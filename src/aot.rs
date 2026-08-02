@@ -347,7 +347,7 @@ pub fn setup_auto_recording(args: AotRecordingArgs) -> Option<JoinHandle<Result<
 
         // Server has completed starting
 
-        let ended_recording = end_aot_recording(&jvm_cache_checker);
+        let ended_recording = end_aot_recording(&jvm_cache_checker, args.compat);
         let ended_recording = match ended_recording {
             Ok(r) => r,
             Err(e) => {
@@ -399,10 +399,12 @@ pub fn setup_auto_recording(args: AotRecordingArgs) -> Option<JoinHandle<Result<
                     "-XX:-AOTInvokeDynamicLinking",
                 ]);
             }
-            cmd.arg(format!("-XX:AOTConfiguration={aot_conf_file}"));
-            cmd.arg(format!("-XX:AOTCache={aot_cache_file}"));
-            cmd.arg("-jar");
-            cmd.arg(jar.as_str());
+            cmd.args(&[
+                format!("-XX:AOTConfiguration={aot_conf_file}").as_str(),
+                format!("-XX:AOTCache={aot_cache_file}").as_str(),
+                "-jar",
+                jar.as_str(),
+            ]);
 
             let (mut reader, writer) = os_pipe::pipe()?;
             cmd.stdout(writer.try_clone().loc(l!())?);
@@ -430,6 +432,9 @@ pub fn setup_auto_recording(args: AotRecordingArgs) -> Option<JoinHandle<Result<
                 let mut msg =
                     "Failed to record AOT cache. Check logs at '.paper/logs/aot-create.log'."
                         .to_string();
+                if !args.compat {
+                    msg.push_str("\nYou can try using '--aot-compat'.");
+                }
                 if !combined_output.is_empty() {
                     msg.push_str("\n");
                     msg.push_str(combined_output.trim());
@@ -582,7 +587,7 @@ fn log_jvm(jvm: &JavaVM, kind: LogKind, msg: &str) {
     }
 }
 
-fn end_aot_recording(jvm: &JavaVM) -> Result<bool, Error> {
+fn end_aot_recording(jvm: &JavaVM, compat: bool) -> Result<bool, Error> {
     let mut scope = ScopeToken::default();
     let mut guard = l!(jni_attach_thread(
         jvm,
@@ -639,11 +644,11 @@ fn end_aot_recording(jvm: &JavaVM) -> Result<bool, Error> {
             "AOT cache config recorded successfully.",
         );
     } else {
-        log_jvm(
-            jvm,
-            LogKind::Error,
-            "AOT cache file writing failed. Check logs at '.paper/logs/aot-record.log'.",
-        );
+        let mut msg = "AOT cache file writing failed. Check logs at '.paper/logs/aot-record.log'.".to_string();
+        if !compat {
+            msg.push_str("\nYou can try using '--aot-compat'.")
+        }
+        log_jvm(jvm, LogKind::Error, msg.as_str());
     }
 
     Ok(ended && is_ok)
