@@ -16,6 +16,7 @@
  */
 
 #![feature(try_blocks)]
+#![feature(error_generic_member_access)]
 
 pub mod aot;
 pub mod args;
@@ -27,12 +28,14 @@ pub mod util;
 use crate::aot::{AotCacheAction, AotMeta, AotRecordingArgs, check_aot_opt, setup_auto_recording};
 use crate::args::split_args;
 use crate::classpath::{repo_dir, setup_classpath};
-use crate::errors::Error;
+use crate::errors::{Error, MapErrGeneric, WithContext};
 use crate::jni::check_java_version;
 use crate::util::{JoinHandleRes, classpath_sep, copy_owned};
 use ::jni::objects::{JObjectArray, JString};
 use ::jni::strings::JNIString;
 use ::jni::{AttachConfig, Env, InitArgsBuilder, JNIVersion, JavaVM, jni_sig, jni_str};
+use std::backtrace::{Backtrace, BacktraceStatus};
+use std::error::request_ref;
 use std::ffi::OsString;
 use std::path::Path;
 use std::sync::Arc;
@@ -40,62 +43,46 @@ use std::thread::JoinHandle;
 
 include!(concat!(env!("OUT_DIR"), "/config.rs"));
 
-pub const ONLY_USE_AOT_FAILED_EXIT_CODE: i32 = 33;
-
 fn main() {
     nyquest_preset::register();
-    std::process::exit(run());
-}
-
-fn run() -> i32 {
-    let args: Vec<String> = std::env::args().collect();
-    let arg_opts = match split_args(args) {
-        Ok(Some(arg_opts)) => arg_opts,
-        Ok(None) => return 0,
-        Err(Error::Exit(code)) => return code,
+    match run() {
+        // For Error::Exit we just want to exit, we don't want to print the error message
+        Err(Error::Exit(code)) => std::process::exit(code as i32),
         Err(e) => {
             eprintln!("{e}");
-            return 1;
+
+            // If backtraces are enabled, print it
+            if let Some(backtrace) = request_ref::<Backtrace>(&e) {
+                if backtrace.status() == BacktraceStatus::Captured {
+                    eprintln!("{}", backtrace);
+                }
+            };
+
+            std::process::exit(1)
         }
-    };
+        Ok(_) => {}
+    }
+}
+
+fn run() -> Result<(), Error> {
+    let args: Vec<String> = std::env::args().collect();
+    let arg_opts = split_args(args)?.ok_or(Error::Exit(0))?;
 
     let jar = Path::new(&arg_opts.jar);
     if !jar.exists() {
-        eprintln!("Jar file does not exist: {}", jar.display());
-        return 1;
+        return generic!("Jar file does not exist: {}", jar.display());
     }
 
     let repo_dir = repo_dir();
     let jvm_args = arg_opts.jvm_args;
     let app_args = arg_opts.app_args;
 
-    let java_home = match java_locator::locate_java_home() {
-        Ok(j) => j,
-        Err(e) => {
-            eprintln!("Failed to locate Java home: {}", e);
-            return 1;
-        }
-    };
+    let java_home = java_locator::locate_java_home().err_ctx("Failed to locate Java home")?;
+    check_java_version(&java_home)?;
 
-    match check_java_version(&java_home) {
-        Ok(()) => {}
-        Err(Error::Exit(code)) => return code,
-        Err(e) => {
-            eprintln!("{}", e);
-            return 1;
-        }
-    };
+    let (classpath, meta) = setup_classpath(&repo_dir, jar).err_ctx("Failed to setup classpath")?;
 
-    let (classpath, meta) = match setup_classpath(&repo_dir, jar) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("{}", Error::wrap("Failed to setup classpath", e));
-            return 1;
-        }
-    };
-
-    // We either need to start the JVM with -XX:AOTCacheOutput= (record) or -XX:AOTCache= (use)
-    let aot_action = match check_aot_opt(
+    let aot_action = check_aot_opt(
         &repo_dir,
         arg_opts.record,
         arg_opts.compat,
@@ -103,74 +90,55 @@ fn run() -> i32 {
         &classpath,
         &jvm_args,
         &app_args,
-    ) {
-        Ok(a) => a,
-        Err(Error::Exit(code)) => return code,
-        Err(e) => {
-            eprintln!("{}", Error::wrap("Failed to check AOT cache", e));
-            return 1;
-        }
-    };
+    )
+    .err_ctx("Failed to check AOT cache")?;
 
     if let AotCacheAction::Record { .. } = aot_action {
+        fn delete(p: &Path, name: &str) -> Result<(), Error> {
+            if p.exists() {
+                std::fs::remove_file(p)
+                    .err_ctx(|| format!("Failed to delete existing AOT {name} file"))?;
+            }
+            Ok(())
+        }
         // If we're recording, we need to delete any existing AOT cache files
-        let meta_file = AotMeta::aot_meta_file(&repo_dir);
-        if meta_file.exists() {
-            std::fs::remove_file(&meta_file).unwrap();
-        }
-        let cache_file = AotMeta::aot_cache_file(&repo_dir);
-        if cache_file.exists() {
-            std::fs::remove_file(&cache_file).unwrap();
-        }
-        let conf_file = AotMeta::aot_conf_file(&repo_dir);
-        if conf_file.exists() {
-            std::fs::remove_file(&conf_file).unwrap();
-        }
+        delete(&AotMeta::aot_meta_file(&repo_dir), "meta")?;
+        delete(&AotMeta::aot_cache_file(&repo_dir), "cache")?;
+        delete(&AotMeta::aot_conf_file(&repo_dir), "config")?;
     }
 
     let jvm_args = copy_owned(&jvm_args);
     let app_args = copy_owned(&app_args);
-    let jvm_thread = std::thread::spawn(move || {
+    let jvm_thread = std::thread::spawn(move || -> Result<(), Error> {
         let _hold = JvmThreadDrop; // Run drop() on this whenever this thread finishes
 
         {
             let aot_logs_dir = Path::new(".paper").join("logs");
             if aot_logs_dir.exists() {
-                match aot_action {
-                    AotCacheAction::Record { .. } => {
-                        let create_log = aot_logs_dir.join("aot-record.log");
-                        if create_log.exists()
-                            && let Err(e) = std::fs::remove_file(&create_log)
-                        {
-                            eprintln!("Failed to delete existing aot-create.log file: {e}");
-                        }
+                if aot_action.is_record() {
+                    let create_log = aot_logs_dir.join("aot-record.log");
+                    if create_log.exists()
+                        && let Err(e) = std::fs::remove_file(&create_log)
+                    {
+                        eprintln!("Failed to delete existing aot-create.log file: {e}");
                     }
-                    AotCacheAction::Use { .. } => {
-                        let use_log = aot_logs_dir.join("aot-use.log");
-                        if use_log.exists()
-                            && let Err(e) = std::fs::remove_file(&use_log)
-                        {
-                            eprintln!("Failed to delete existing aot-use.log file: {e}");
-                        }
+                } else if aot_action.is_use() {
+                    let use_log = aot_logs_dir.join("aot-use.log");
+                    if use_log.exists()
+                        && let Err(e) = std::fs::remove_file(&use_log)
+                    {
+                        eprintln!("Failed to delete existing aot-use.log file: {e}");
                     }
-                    AotCacheAction::None => {}
                 }
             } else if let Err(e) = std::fs::create_dir_all(&aot_logs_dir) {
                 eprintln!("Failed to create AOT logs directory: {}", e);
             }
         }
 
-        let jvm = match create_jvm(&jvm_args, &classpath, &aot_action) {
-            Ok(jvm) => jvm,
-            Err(Error::Exit(code)) => return code,
-            Err(e) => {
-                eprintln!("{}", Error::wrap("Failed to create JVM", e));
-                return 1;
-            }
-        };
+        let jvm = create_jvm(&jvm_args, &classpath, &aot_action).err_ctx("Failed to create JVM")?;
         let jvm = Arc::new(jvm);
 
-        if let AotCacheAction::Record { .. } = aot_action {
+        if aot_action.is_record() {
             println!(
                 "Beginning AOT cache recording (This may cause slowdowns while the JVM is recording)..."
             );
@@ -211,13 +179,7 @@ fn run() -> i32 {
             eprintln!("Error during AOT recording: {e}");
         }
 
-        match server_thread_res {
-            Ok(_) => 0,
-            Err(e) => {
-                eprintln!("Error during server thread: {e}");
-                1
-            }
-        }
+        server_thread_res.err_ctx("Error during server thread")
     });
 
     // Run the native macOS event loop on the main thread
@@ -231,7 +193,7 @@ fn run() -> i32 {
         }
     }
 
-    jvm_thread.join().unwrap_or(1)
+    jvm_thread.join().unwrap_or(Err(Error::Exit(1)))
 }
 
 struct JvmThreadDrop;
@@ -343,43 +305,30 @@ fn init_jvm(
     }
 
     let classpath_text = classpath.join(&classpath_sep());
-    let classpath_text = match classpath_text.into_string() {
-        Ok(t) => t,
-        Err(e) => {
-            return generic!("Failed to convert classpath to string: {}", e.display());
-        }
-    };
+    let classpath_text = classpath_text
+        .into_string()
+        .map_err_generic(|e| format!("Failed to convert classpath to string: {}", e.display()))?;
     init_args = init_args.option(format!("-Djava.class.path={classpath_text}"));
 
     for arg in jvm_args {
         init_args = init_args.option(arg);
     }
 
-    let init_args = err! {
-        init_args.build()
-        => "Failed to initialize JVM"
-    }?;
-    err! {
-        JavaVM::new(init_args)
-        => "Failed to start JVM"
-    }
+    let init_args = init_args.build().err_ctx("Failed to initialize JVM")?;
+    JavaVM::new(init_args).err_ctx("Failed to start JVM")
 }
 
 fn exec_jvm(env: &mut Env, main_class: &str, args: &[String]) -> Result<(), Error> {
-    let args_array = l!(JObjectArray::<JString>::new(
-        env,
-        args.len(),
-        JString::null()
-    ))?;
+    let args_array = JObjectArray::<JString>::new(env, args.len(), JString::null())?;
     for (i, arg) in args.iter().enumerate() {
-        let arg = l!(JString::new(env, arg.clone()))?;
-        l!(args_array.set_element(env, i, arg))?;
+        let arg = JString::new(env, arg.clone())?;
+        args_array.set_element(env, i, arg)?;
     }
 
     let class_name = JNIString::new(main_class.replace(".", "/"));
     let psvm_name = jni_str!("main");
     let psvm_desc = jni_sig!("([Ljava/lang/String;)V");
-    l!(env.call_static_method(class_name, psvm_name, psvm_desc, &[(&args_array).into()]))?;
+    env.call_static_method(class_name, psvm_name, psvm_desc, &[(&args_array).into()])?;
 
     if env.exception_check() {
         env.exception_describe(); // Prints the stack trace to stderr

@@ -15,8 +15,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-use crate::errors::Error;
-use crate::{err, generic, l};
+use crate::errors::{Error, WithContext};
+use crate::generic;
 use jni::objects::{JPrimitiveArray, TypeArray};
 use jni::strings::JNIStr;
 use jni::{AttachConfig, AttachGuard, Env, JavaVM, ScopeToken};
@@ -44,8 +44,8 @@ pub fn as_primitive_array<'a: 'b, 'b, T: TypeArray>(
     env: &mut Env<'a>,
     array: &[T],
 ) -> Result<JPrimitiveArray<'b, T>, Error> {
-    let java_array = l!(JPrimitiveArray::<T>::new(env, array.len()))?;
-    l!(java_array.set_region(env, 0, array))?;
+    let java_array = JPrimitiveArray::<T>::new(env, array.len())?;
+    java_array.set_region(env, 0, array)?;
     Ok(java_array)
 }
 
@@ -71,11 +71,13 @@ pub fn check_java_version(java_home: &str) -> Result<(), Error> {
     let java_home = Path::new(java_home);
     let java = java_bin(java_home);
 
-    let version_text = err! {
-        Command::new(&java).arg("-version").output()
-        => format!("Failed to execute 'java -version' command ({})", java.display())
-    }?
-    .stderr;
+    let version_text = Command::new(&java).arg("-version").output().err_ctx(|| {
+        format!(
+            "Failed to execute 'java -version' command ({})",
+            java.display()
+        )
+    })?;
+    let version_text = version_text.stderr;
     let version_text = String::from_utf8_lossy(&version_text);
     let version_line = match version_text.lines().next() {
         Some(l) => l,
@@ -97,10 +99,11 @@ pub fn check_java_version(java_home: &str) -> Result<(), Error> {
         None => return generic!("Failed to parse 'java -version' (no version number found)"),
     };
 
+    let version = version.strip_suffix("-ea").unwrap_or(version);
     let version_parts = version.split('.').take(3).collect::<Vec<&str>>();
-    let major_version = l!(version_part(&version_parts, 0))?;
-    let minor_version = l!(version_part(&version_parts, 1))?;
-    let patch_version = l!(version_part(&version_parts, 2))?;
+    let major_version = version_part(&version_parts, 0)?;
+    let minor_version = version_part(&version_parts, 1)?;
+    let patch_version = version_part(&version_parts, 2)?;
 
     let version_err = "Unsupported Java version: Java 25.0.4 or higher is required, found: ";
 
@@ -144,17 +147,11 @@ fn version_part(parts: &[&str], index: usize) -> Result<Option<u16>, Error> {
     if parts.len() <= index {
         return Ok(None);
     }
-    let num = match parts[index].parse::<u16>() {
-        Ok(v) => v,
-        Err(e) => {
-            return l!(Err(Error::wrap(
-                format!(
-                    "Failed to parse 'java -version' (invalid version number): {}",
-                    parts[index]
-                ),
-                e,
-            )));
-        }
-    };
+    let num = parts[index].parse::<u16>().err_ctx(|| {
+        format!(
+            "Failed to parse 'java -version' (invalid version number): {}",
+            parts[index]
+        )
+    })?;
     Ok(Some(num))
 }

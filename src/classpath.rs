@@ -15,12 +15,12 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-use crate::errors::{Error, ErrorLoc};
+use crate::errors::{Error, IntoError, WithContext};
+use crate::generic;
 use crate::util::{
     bytes_matches_hash, create_file, extract_zip_entry, file_matches_hash, find_zip_entry,
     open_zip, parse_hex_named, read_zip_entry, read_zip_entry_text, require_zip_entry,
 };
-use crate::{err, generic, l};
 use qbsdiff::Bspatch;
 use std::ffi::OsString;
 use std::fmt::Debug;
@@ -49,10 +49,11 @@ pub fn setup_classpath(dir: &Path, jar_file: &Path) -> Result<(Vec<OsString>, Ta
     }
 
     let base_file = if let Some(download_context) = &meta.download_context {
-        Some(err! {
-            download_context.download(dir)
-            => format!("Failed to download file: {}", download_context.file_name)
-        }?)
+        Some(
+            download_context
+                .download(dir)
+                .err_ctx(|| format!("Failed to download file: {}", download_context.file_name))?,
+        )
     } else {
         None
     };
@@ -74,45 +75,45 @@ pub struct TackMeta {
 
 pub fn extract_metadata(jar: &mut ZipArchive<File>) -> Result<TackMeta, Error> {
     let patches_list = {
-        let entry = l!(find_zip_entry(jar, "META-INF/patches.list"))?;
+        let entry = find_zip_entry(jar, "META-INF/patches.list")?;
         if let Some(mut entry) = entry {
-            Some(l!(read_zip_entry_text(&mut entry))?)
+            Some(read_zip_entry_text(&mut entry)?)
         } else {
             None
         }
     };
     let versions_list = {
         let mut entry = require_zip_entry(jar, "META-INF/versions.list")?;
-        l!(read_zip_entry_text(&mut entry))?
+        read_zip_entry_text(&mut entry)?
     };
     let libraries_list = {
         let mut entry = require_zip_entry(jar, "META-INF/libraries.list")?;
-        l!(read_zip_entry_text(&mut entry))?
+        read_zip_entry_text(&mut entry)?
     };
     let download_context = {
-        let entry = l!(find_zip_entry(jar, "META-INF/download-context"))?;
+        let entry = find_zip_entry(jar, "META-INF/download-context")?;
         if let Some(mut entry) = entry {
-            Some(l!(read_zip_entry_text(&mut entry))?)
+            Some(read_zip_entry_text(&mut entry)?)
         } else {
             None
         }
     };
     let main_class = {
         let mut entry = require_zip_entry(jar, "META-INF/main-class")?;
-        l!(read_zip_entry_text(&mut entry))?
+        read_zip_entry_text(&mut entry)?
     };
 
-    let patches_list = if let Some(patches_list) = patches_list {
-        Some(l!(PatchEntry::parse(&patches_list))?)
+    let patches_list = if let Some(ref patches_list) = patches_list {
+        Some(PatchEntry::parse(patches_list)?)
     } else {
         None
     };
 
-    let versions_list = l!(FileEntry::parse("versions.list", &versions_list))?;
-    let libraries_list = l!(FileEntry::parse("libraries.list", &libraries_list))?;
+    let versions_list = FileEntry::parse("versions.list", &versions_list)?;
+    let libraries_list = FileEntry::parse("libraries.list", &libraries_list)?;
 
     let download_context = if let Some(download_context) = download_context {
-        Some(l!(DownloadContext::parse(&download_context))?)
+        Some(DownloadContext::parse(&download_context)?)
     } else {
         None
     };
@@ -132,49 +133,42 @@ fn extract_and_apply_patches<P: AsRef<Path> + Debug>(
     original_jar_file: Option<P>,
     meta: &TackMeta,
 ) -> Result<Classpath, Error> {
-    let mut original_jar = err! {
-        try {
-            original_jar_file
-                .as_ref()
-                .map(|j| ZipArchive::new(File::open(j)?) )
-                .transpose().loc(l!())?
-        } => format!("Failed to open jar: {:?}", original_jar_file)
-    }?;
+    let mut original_jar = try {
+        original_jar_file
+            .as_ref()
+            .map(|j| ZipArchive::new(File::open(j)?))
+            .transpose()?
+    }
+    .err_ctx(|| format!("Failed to open jar: {:?}", original_jar_file))?;
 
     let mut classpath = Classpath {
         versions: vec![],
         libraries: vec![],
     };
-    err! {
-        try {
-            extract_files(
-                meta,
-                Location::Versions,
-                dir,
-                paperclip_jar,
-                &mut original_jar,
-                &meta.versions,
-                &mut classpath,
-            )?
-        } => "Failed to extract versions"
-    }?;
-    err! {
-        try {
-            extract_files(
-                meta,
-                Location::Libraries,
-                dir,
-                paperclip_jar,
-                &mut original_jar,
-                &meta.libraries,
-                &mut classpath,
-            )?
-        } => "Failed to extract libraries"
-    }?;
+    extract_files(
+        meta,
+        Location::Versions,
+        dir,
+        paperclip_jar,
+        &mut original_jar,
+        &meta.versions,
+        &mut classpath,
+    )
+    .err_ctx("Failed to extract versions")?;
 
-    err! { apply_patches(meta, dir, paperclip_jar, &mut original_jar, &mut classpath) =>
-        "Failed to apply patches"
-    }?;
+    extract_files(
+        meta,
+        Location::Libraries,
+        dir,
+        paperclip_jar,
+        &mut original_jar,
+        &meta.libraries,
+        &mut classpath,
+    )
+    .err_ctx("Failed to extract libraries")?;
+
+    apply_patches(meta, dir, paperclip_jar, &mut original_jar, &mut classpath)
+        .err_ctx("Failed to apply patches")?;
 
     Ok(classpath)
 }
@@ -195,18 +189,17 @@ fn extract_files(
     let jar_path = format!("META-INF/{}", location.name());
     let target_path = dir.join(location.name());
     for entry in entries {
-        err! {
-            entry.extract(FileEntryArgs {
+        entry
+            .extract(FileEntryArgs {
                 meta,
                 location,
                 target_base_path: &target_path,
                 paperclip_jar,
                 original_jar,
                 jar_base_path: &jar_path,
-                classpath
+                classpath,
             })
-            => format!("Failed to extract files from {}/{}: {}/{}", jar_path, entry.path, target_path.display(), entry.path)
-        }?;
+            .err_ctx(|| format!("Failed to extract file: {}", entry.path))?;
     }
 
     Ok(())
@@ -229,11 +222,14 @@ fn apply_patches(
 
     let mut announced = false;
     for patch_entry in &meta.patches {
-        err! {
-            try {
-                announced |= patch_entry.apply_patch(dir, paperclip_jar, original_jar, announced, classpath)?
-            } => format!("Failed to apply patch: {}/{}", patch_entry.location, patch_entry.patch_path)
-        }?;
+        announced |= patch_entry
+            .apply_patch(dir, paperclip_jar, original_jar, announced, classpath)
+            .err_ctx(|| {
+                format!(
+                    "Failed to apply patch: {}/{}",
+                    patch_entry.location, patch_entry.patch_path
+                )
+            })?;
     }
 
     Ok(())
@@ -299,17 +295,21 @@ impl FileEntry {
         let entry_path = format!("{}/{}", args.jar_base_path, self.path);
 
         if let Some(mut entry) = find_zip_entry(args.paperclip_jar, &entry_path)? {
-            err! {
-                extract_zip_entry(&mut entry, &entry_path, &output_path)
-                => format!("Failed to extract file from paperclip jar: {}/{}", args.jar_base_path, self.path)
-            }?
+            extract_zip_entry(&mut entry, &entry_path, &output_path).err_ctx(|| {
+                format!(
+                    "Failed to extract file from paperclip jar: {}/{}",
+                    args.jar_base_path, self.path
+                )
+            })?;
         } else {
             if let Some(original_jar) = args.original_jar {
                 if let Some(mut entry) = find_zip_entry(original_jar, &entry_path)? {
-                    err! {
-                        extract_zip_entry(&mut entry, &entry_path, &output_path)
-                        => format!("Failed to extract file from original jar: {}/{}", args.jar_base_path, self.path)
-                    }?
+                    extract_zip_entry(&mut entry, &entry_path, &output_path).err_ctx(|| {
+                        format!(
+                            "Failed to extract file from original jar: {}/{}",
+                            args.jar_base_path, self.path
+                        )
+                    })?;
                 } else {
                     return generic!(
                         "{} not found in either paperclip jar or original jar",
@@ -324,7 +324,7 @@ impl FileEntry {
             }
         }
 
-        if !file_matches_hash(&output_path, &self.hash).loc(l!())? {
+        if !file_matches_hash(&output_path, &self.hash)? {
             return generic!("Hash check failed for extracted file {}", self.path);
         }
 
@@ -341,7 +341,7 @@ impl FileEntry {
                 return generic!("Invalid line in {file}: {line}");
             }
 
-            let hash = l!(parse_hex_named("hash", parts[0]))?;
+            let hash = parse_hex_named("hash", parts[0])?;
             let id = parts[1];
             let path = parts[2];
 
@@ -381,7 +381,7 @@ impl PatchEntry {
         let output_file = repo_dir.join(&self.location).join(&self.output_path);
 
         // Short-cut if the patch is already applied
-        if output_file.exists() && file_matches_hash(&output_file, &self.output_hash).loc(l!())? {
+        if output_file.exists() && file_matches_hash(&output_file, &self.output_hash)? {
             classpath.push(location, output_file.into_os_string());
             return Ok(false);
         }
@@ -395,11 +395,11 @@ impl PatchEntry {
             Err(ZipError::FileNotFound) => {
                 return generic!("Input file not found in original jar {jar_path}");
             }
-            Err(e) => return l!(Err(Error::from(e))),
+            Err(e) => return Err(Error::from(e)),
         };
 
         let mut input_file_data = Vec::<u8>::new();
-        l!(jar_entry.read_to_end(&mut input_file_data))?;
+        jar_entry.read_to_end(&mut input_file_data)?;
 
         if !bytes_matches_hash(&input_file_data, &self.original_hash) {
             return generic!("Hash check of input file failed for {jar_path}");
@@ -413,28 +413,27 @@ impl PatchEntry {
                 return generic!("Patch file not found in paperclip jar: {}", &patch_jar_path);
             }
         };
-        let patch_data = l!(read_zip_entry(&mut patch_entry))?;
+        let patch_data = read_zip_entry(&mut patch_entry)?;
 
         if !bytes_matches_hash(&patch_data, &self.patch_hash) {
             return generic!("Hash check of patch file failed for {}", self.patch_path);
         }
 
-        err! {
-            try {
-                if let Some(parent) = output_file.parent() {
-                    err! {
-                        std::fs::create_dir_all(parent)
-                        => format!("Failed to create directory: {}", parent.display())
-                    }?;
-                }
-                let mut target_file = create_file(&output_file).loc(l!())?;
+        try {
+            if let Some(parent) = output_file.parent() {
+                std::fs::create_dir_all(parent)
+                    .err_ctx(|| format!("Failed to create directory: {}", parent.display()))?;
+            }
+            let mut target_file = create_file(&output_file)?;
 
-                let patcher = Bspatch::new(&patch_data).loc(l!())?;
-                patcher.apply(&input_file_data, &mut target_file).loc(l!())?;
-            } => "Error executing bsdiff patch"
-        }?;
+            let patcher = Bspatch::new(&patch_data).into_error()?;
+            patcher
+                .apply(&input_file_data, &mut target_file)
+                .into_error()?;
+        }
+        .err_ctx("Error executing bsdiff patch")?;
 
-        if !file_matches_hash(&output_file, &self.output_hash).loc(l!())? {
+        if !file_matches_hash(&output_file, &self.output_hash)? {
             return generic!("Patch not applied correctly for {}", self.output_path);
         }
 
@@ -451,9 +450,9 @@ impl PatchEntry {
             }
 
             let location = parts[0];
-            let original_hash = l!(parse_hex_named("original_hash", parts[1]))?;
-            let patch_hash = l!(parse_hex_named("patch_hash", parts[2]))?;
-            let output_hash = l!(parse_hex_named("output_hash", parts[3]))?;
+            let original_hash = parse_hex_named("original_hash", parts[1])?;
+            let patch_hash = parse_hex_named("patch_hash", parts[2])?;
+            let output_hash = parse_hex_named("output_hash", parts[3])?;
             let original_path = parts[4];
             let patch_path = parts[5];
             let output_path = parts[6];
@@ -490,9 +489,9 @@ pub struct DownloadContext {
 
 impl DownloadContext {
     pub fn download(&self, repo_dir: &Path) -> Result<PathBuf, Error> {
-        let target_file = err! { self.create_output_target(repo_dir) =>
-            format!("Failed to create directory: {}", repo_dir.display())
-        }?;
+        let target_file = self
+            .create_output_target(repo_dir)
+            .err_ctx(|| format!("Failed to create directory: {}", repo_dir.display()))?;
         if target_file.exists() && file_matches_hash(&target_file, &self.hash)? {
             return Ok(target_file);
         }
@@ -510,15 +509,14 @@ impl DownloadContext {
 
         println!("Downloading {}", self.file_name);
 
-        let mut output_file = create_file(&target_file).loc(l!())?;
-        err! {
-            try {
-                let mut downloader = nyquest::blocking::get(self.url.to_string())?.into_read();
-                std::io::copy(&mut downloader, &mut output_file).map_err(Into::into)?
-            } => format!("Failed to download: {}", self.file_name)
-        }?;
+        let mut output_file = create_file(&target_file)?;
+        try {
+            let mut downloader = nyquest::blocking::get(self.url.to_string())?.into_read();
+            std::io::copy(&mut downloader, &mut output_file).map_err(Into::into)?
+        }
+        .err_ctx(|| format!("Failed to download: {}", self.file_name))?;
 
-        if !file_matches_hash(&target_file, &self.hash).loc(l!())? {
+        if !file_matches_hash(&target_file, &self.hash)? {
             return generic!(
                 "Hash check failed for downloaded file {}",
                 target_file.display()
@@ -531,9 +529,8 @@ impl DownloadContext {
     fn create_output_target(&self, repo_dir: &Path) -> Result<PathBuf, Error> {
         let target_path = repo_dir.join(".paper").join("cache").join(&self.file_name);
         if let Some(parent) = target_path.parent() {
-            err! { std::fs::create_dir_all(parent) =>
-                format!("Failed to create output directory {}", parent.display())
-            }?;
+            std::fs::create_dir_all(parent)
+                .err_ctx(|| format!("Failed to create output directory {}", parent.display()))?;
         }
         Ok(target_path)
     }
@@ -544,7 +541,7 @@ impl DownloadContext {
             return generic!("Invalid download-context: {}", text);
         }
 
-        let hash = l!(parse_hex_named("hash", parts[0]))?;
+        let hash = parse_hex_named("hash", parts[0])?;
         let url = parts[1];
         let file_name = parts[2];
 

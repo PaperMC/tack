@@ -14,137 +14,141 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
-
+use std::backtrace::Backtrace;
 use thiserror::Error;
+
+pub const ONLY_USE_AOT_FAILED_EXIT_CODE: u8 = 33;
 
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("JNI error: {0:?}")]
-    Jni(#[from] jni::errors::Error),
+    Jni(#[from] jni::errors::Error, #[backtrace] Backtrace),
     #[error("JVM error: {0:?}")]
-    JVM(#[from] jni::JvmError),
+    JVM(#[from] jni::JvmError, #[backtrace] Backtrace),
     #[error("JVM start error: {0:?}")]
-    StartJvm(#[from] jni::errors::StartJvmError),
+    StartJvm(#[from] jni::errors::StartJvmError, #[backtrace] Backtrace),
     #[error("Failed to find Java installation: {0:?}")]
-    JavaLoc(#[from] java_locator::errors::JavaLocatorError),
+    JavaLoc(
+        #[from] java_locator::errors::JavaLocatorError,
+        #[backtrace] Backtrace,
+    ),
     #[error("IO error: {0:?}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] std::io::Error, #[backtrace] Backtrace),
     #[error("Time error: {0:?}")]
-    Time(#[from] std::time::SystemTimeError),
+    Time(#[from] std::time::SystemTimeError, #[backtrace] Backtrace),
     #[error("Download error: {0:?}")]
-    Net(#[from] nyquest::Error),
+    Net(#[from] nyquest::Error, #[backtrace] Backtrace),
     #[error("Zip error: {0:?}")]
-    Zip(#[from] zip::result::ZipError),
+    Zip(#[from] zip::result::ZipError, #[backtrace] Backtrace),
     #[error("UTF-8 error: {0:?}")]
-    Utf(#[from] std::string::FromUtf8Error),
+    Utf(#[from] std::string::FromUtf8Error, #[backtrace] Backtrace),
     #[error("Hex error: {0:?}")]
-    Hex(#[from] hex::FromHexError),
+    Hex(#[from] hex::FromHexError, #[backtrace] Backtrace),
     #[error("Parse error: {0:?}")]
-    Int(#[from] std::num::ParseIntError),
+    Int(#[from] std::num::ParseIntError, #[backtrace] Backtrace),
     #[error("Serialization error: {0:?}")]
-    Postcard(#[from] postcard::Error),
+    Postcard(#[from] postcard::Error, #[backtrace] Backtrace),
     #[error("{msg}\nCaused by: {cause}")]
     Wrapped {
         msg: String,
         #[source]
+        #[backtrace]
         cause: Box<Error>,
+        // #[backtrace]
+        // backtrace: Backtrace,
     },
-    #[error("{0}")]
-    Generic(String),
-    #[error("{file}:{line}: {error}")]
-    Loc {
-        file: &'static str,
-        line: u32,
-        #[source]
-        error: Box<Error>,
+    #[error("{msg}")]
+    Generic {
+        msg: String,
+        #[backtrace]
+        backtrace: Backtrace,
     },
     #[error("Exiting with code {0}")]
-    Exit(i32),
+    Exit(u8),
 }
 
-pub trait ErrorLoc {
-    type Output;
+impl Error {
+    pub fn generic(msg: impl Into<String>) -> Self {
+        Self::Generic {
+            msg: msg.into(),
+            backtrace: Backtrace::capture(),
+        }
+    }
 
-    fn loc(self, loc: Loc) -> Self::Output;
-}
-
-impl<T, E: Into<Error>> ErrorLoc for Result<T, E> {
-    type Output = Result<T, Error>;
-
-    fn loc(self, loc: Loc) -> Self::Output {
-        match self {
-            Ok(r) => Ok(r),
-            Err(e) => Err(Error::loc(loc.file, loc.line, e)),
+    pub fn wrap(msg: impl Into<String>, err: impl Into<Error>) -> Self {
+        Self::Wrapped {
+            msg: msg.into(),
+            cause: Box::new(err.into()),
         }
     }
 }
 
-pub struct Loc {
-    pub file: &'static str,
-    pub line: u32,
+pub trait IntoErrorMsg {
+    fn into_error_msg(self) -> String;
 }
 
-#[macro_export]
-macro_rules! err {
-    ($res:expr => $msg:expr) => {
-        match $crate::l!($res) {
-            Ok(r) => Ok(r),
-            Err(e) => Err($crate::errors::Error::wrap($msg, e)),
-        }
-    };
+impl IntoErrorMsg for &'static str {
+    fn into_error_msg(self) -> String {
+        self.to_string()
+    }
+}
+impl IntoErrorMsg for String {
+    fn into_error_msg(self) -> String {
+        self
+    }
 }
 
-#[macro_export]
-macro_rules! l {
-    () => {
-        $crate::errors::Loc {
-            file: file!(),
-            line: line!(),
-        }
-    };
-    ($res:expr) => {
-        match $res.map_err($crate::errors::Error::from) {
-            Ok(r) => Ok(r),
-            Err(Error::Loc {
-                file: _,
-                line: _,
-                error,
-            }) => Err(Error::loc(file!(), line!(), error)), // Reset loc info
-            Err(e) => Err(Error::loc(file!(), line!(), e)),
-        }
-    };
+impl<F, S> IntoErrorMsg for F
+where
+    F: FnOnce() -> S,
+    S: Into<String>,
+{
+    fn into_error_msg(self) -> String {
+        self().into()
+    }
+}
+
+pub trait WithContext<E: Into<Error>> {
+    type Output;
+
+    fn err_ctx(self, msg: impl IntoErrorMsg) -> Self::Output;
+}
+
+impl<T, E: Into<Error>> WithContext<E> for Result<T, E> {
+    type Output = Result<T, Error>;
+
+    fn err_ctx(self, msg: impl IntoErrorMsg) -> Self::Output {
+        self.map_err(|e| Error::wrap(msg.into_error_msg(), e))
+    }
+}
+
+pub trait MapErrGeneric<E> {
+    type Output;
+
+    fn map_err_generic<S: Into<String>>(self, f: impl FnOnce(E) -> S) -> Self::Output;
+}
+
+impl<T, E> MapErrGeneric<E> for Result<T, E> {
+    type Output = Result<T, Error>;
+
+    fn map_err_generic<S: Into<String>>(self, f: impl FnOnce(E) -> S) -> Self::Output {
+        self.map_err(|e| Error::generic(f(e)))
+    }
+}
+
+pub trait IntoError<T> {
+    fn into_error(self) -> Result<T, Error>;
+}
+
+impl<T, E: Into<Error>> IntoError<T> for Result<T, E> {
+    fn into_error(self) -> Result<T, Error> {
+        self.map_err(|e| e.into())
+    }
 }
 
 #[macro_export]
 macro_rules! generic {
     ($($arg:tt)*) => {
-        $crate::l!(Err($crate::errors::Error::generic(format!($($arg)*))))
+        Err($crate::errors::Error::generic(format!($($arg)*)))
     };
-}
-
-impl Error {
-    pub fn wrap(msg: impl Into<String>, cause: impl Into<Self>) -> Self {
-        Error::Wrapped {
-            msg: msg.into(),
-            cause: Box::from(cause.into()),
-        }
-    }
-
-    pub fn generic(s: impl Into<String>) -> Self {
-        Error::Generic(s.into())
-    }
-
-    pub fn loc(file: &'static str, line: u32, cause: impl Into<Self>) -> Self {
-        Error::Loc {
-            file,
-            line,
-            error: Box::from(cause.into()),
-        }
-    }
-}
-
-impl From<Box<Error>> for Error {
-    fn from(value: Box<Error>) -> Self {
-        *value
-    }
 }

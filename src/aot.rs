@@ -16,10 +16,10 @@
  */
 
 use crate::args::RecordMode;
-use crate::errors::{Error, ErrorLoc};
+use crate::errors::{Error, IntoError, ONLY_USE_AOT_FAILED_EXIT_CODE, WithContext};
 use crate::jni::{java_bin, jni_attach_thread};
 use crate::util::{copy_owned, create_directory, file_hash};
-use crate::{ONLY_USE_AOT_FAILED_EXIT_CODE, err, generic, l, null};
+use crate::{generic, null};
 use jni::objects::{JObject, JObjectArray, JString};
 use jni::{AttachConfig, Env, JValue, JavaVM, ScopeToken, jni_sig, jni_str};
 use serde::{Deserialize, Serialize};
@@ -63,10 +63,11 @@ impl AotMeta {
         let java_home = Path::new(java_home);
         let java = java_bin(java_home);
 
-        let output = err! {
-            Command::new(&java).arg("-Xinternalversion").output()
-            => format!("Failed to execute 'java -Xinternalversion' command ({})", java.display())
-        }?;
+        let output = Command::new(&java).arg("-Xinternalversion").output();
+        let output = output.err_ctx(|| {
+            let msg = "Failed to execute 'java -Xinternalversion' command";
+            format!("{} ({})", msg, java.display())
+        })?;
         let jvm_ident = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
         let mut classpath_hashed = HashMap::<OsString, Fingerprint>::new();
@@ -79,20 +80,23 @@ impl AotMeta {
                 );
             }
 
-            let meta = err! {
-                std::fs::metadata(path)
-                => format!("Failed to read file metadata for {}", path.display())
-            }?;
-            let modified_time = err! {
-                try {
-                    meta
-                        .modified().loc(l!())?
-                        .duration_since(SystemTime::UNIX_EPOCH).loc(l!())?
-                        .as_millis()
-                }
-                => format!("Failed to read file modification time for {}", path.display())
-            }?;
-            let hash = l!(file_hash(file))?;
+            let meta = std::fs::metadata(path)
+                .err_ctx(|| format!("Failed to read file metadata for {}", path.display()))?;
+            let modified_time: u128 = try {
+                meta.modified()
+                    .into_error()?
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .into_error()?
+                    .as_millis()
+            }
+            .err_ctx(|| {
+                format!(
+                    "Failed to read file modification time for {}",
+                    path.display()
+                )
+            })?;
+
+            let hash = file_hash(file)?;
             classpath_hashed.insert(
                 path.clone(),
                 Fingerprint {
@@ -102,7 +106,7 @@ impl AotMeta {
             );
         }
 
-        let aot_cache_hash = l!(file_hash(aot_cache_file))?;
+        let aot_cache_hash = file_hash(aot_cache_file)?;
 
         Ok(AotMeta {
             jvm_ident,
@@ -127,35 +131,30 @@ impl AotMeta {
     }
 
     pub fn read(aot_meta_file: &Path) -> Result<Self, Error> {
-        let bytes = err! {
-            std::fs::read(aot_meta_file)
-            => format!("Failed to read AOT meta file: {}", aot_meta_file.display())
-        }?;
-        let meta = err! {
-            postcard::from_bytes::<Self>(&bytes)
-            => format!("Failed to parse AOT meta file: {}", aot_meta_file.display())
-        }?;
+        let bytes = std::fs::read(aot_meta_file)
+            .err_ctx(|| format!("Failed to read AOT meta file: {}", aot_meta_file.display()))?;
+        let meta = postcard::from_bytes::<Self>(&bytes)
+            .err_ctx(|| format!("Failed to parse AOT meta file: {}", aot_meta_file.display()))?;
         Ok(meta)
     }
 
     pub fn write(&self, aot_meta_file: &Path) -> Result<(), Error> {
         let bytes = Vec::new();
-        let bytes = err! {
-            postcard::to_extend(&self, bytes)
-            => "Failed to serialize AOT meta file"
-        }?;
+        let bytes =
+            postcard::to_extend(&self, bytes).err_ctx("Failed to serialize AOT meta file")?;
         if let Some(parent) = aot_meta_file.parent() {
             create_directory(parent)?;
         }
         let tmp_out = aot_meta_file.with_file_name("paper.aot.meta.tmp");
-        err! {
-            std::fs::write(&tmp_out, &bytes)
-            => format!("Failed to write AOT meta file: {}", tmp_out.display())
-        }?;
-        err! {
-            std::fs::rename(&tmp_out, aot_meta_file)
-            => format!("Failed to rename AOT meta file: {} -> {}", tmp_out.display(), aot_meta_file.display())
-        }?;
+        std::fs::write(&tmp_out, &bytes)
+            .err_ctx(|| format!("Failed to write AOT meta file: {}", tmp_out.display()))?;
+        std::fs::rename(&tmp_out, aot_meta_file).err_ctx(|| {
+            format!(
+                "Failed to rename AOT meta file: {} -> {}",
+                tmp_out.display(),
+                aot_meta_file.display()
+            )
+        })?;
 
         Ok(())
     }
@@ -185,6 +184,27 @@ impl AotCacheAction {
     }
     pub fn none() -> Self {
         Self::None
+    }
+
+    pub fn is_use(&self) -> bool {
+        match self {
+            AotCacheAction::Use { .. } => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_record(&self) -> bool {
+        match self {
+            AotCacheAction::Record { .. } => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_none(&self) -> bool {
+        match self {
+            AotCacheAction::None => true,
+            _ => false,
+        }
     }
 }
 
@@ -223,14 +243,8 @@ pub fn check_aot_opt(
 
     let jvm_args = copy_owned(jvm_args);
     let app_args = copy_owned(app_args);
-    let current_meta = l!(AotMeta::build(
-        java_home,
-        classpath,
-        &jvm_args,
-        &app_args,
-        &aot_cache_file
-    ))?;
-    let saved_meta = l!(AotMeta::read(&aot_meta_file))?;
+    let current_meta = AotMeta::build(java_home, classpath, &jvm_args, &app_args, &aot_cache_file)?;
+    let saved_meta = AotMeta::read(&aot_meta_file)?;
 
     match mode {
         RecordMode::Normal => {
@@ -311,10 +325,8 @@ pub fn setup_auto_recording(args: AotRecordingArgs) -> Option<JoinHandle<Result<
                             jni_str!("net/minecraft/server/MinecraftServer"),
                             jni_str!("SERVER"),
                             jni_sig!("Lnet/minecraft/server/MinecraftServer;"),
-                        )
-                        .loc(l!())?
-                        .into_object()
-                        .loc(l!())?;
+                        )?
+                        .l()?;
                     if minecraft_server.is_null() {
                         return Ok(());
                     }
@@ -331,8 +343,7 @@ pub fn setup_auto_recording(args: AotRecordingArgs) -> Option<JoinHandle<Result<
                         jni_str!("halt"),
                         jni_sig!("(Z)V"),
                         &[JValue::Bool(true)],
-                    )
-                    .loc(l!())?;
+                    )?;
                     Ok(())
                 });
             }
@@ -359,22 +370,17 @@ fn write_meta_file(args: &AotRecordingArgs) -> Result<(), Error> {
         // for us to release the last non-daemon thread.
 
         let mut scope = ScopeToken::default();
-        let mut guard = l!(jni_attach_thread(
-            &jvm,
-            &mut scope,
-            jni_str!("aot-cache-checker")
-        ))?;
+        let mut guard = jni_attach_thread(&jvm, &mut scope, jni_str!("aot-cache-checker"))?;
         let env = guard.borrow_env_mut();
 
         // While we are waiting, we need to make sure the `main` and `Server thread` threads are still running.
         // If both threads are gone, that means the server has crashed.
-        if !check_threads_are_running(env).loc(l!())? {
+        if !check_threads_are_running(env)? {
             return Ok(());
         }
 
         let has_started = env
-            .get_static_field(watchdog_thread, has_started_field, &has_started_sig)
-            .loc(l!())?
+            .get_static_field(watchdog_thread, has_started_field, &has_started_sig)?
             .z();
         match has_started {
             Ok(true) => break,
@@ -383,27 +389,20 @@ fn write_meta_file(args: &AotRecordingArgs) -> Result<(), Error> {
                 env.exception_clear(); // ignore it
                 continue;
             }
-            Err(e) => return l!(Err(Error::from(e))),
+            Err(e) => return Err(Error::from(e)),
         };
     }
 
     // Server has completed starting
 
     let ended_recording = end_aot_recording(&jvm, args.compat);
-    let ended_recording = match ended_recording {
-        Ok(r) => r,
-        Err(e) => {
-            return l!(Err(Error::wrap("Failed to end AOT cache recording", e)));
-        }
-    };
+    let ended_recording = ended_recording.err_ctx("Failed to end AOT cache recording")?;
 
     if ended_recording {
         // Recording is done, we need to create the AOT cache now
         // We do that by calling ourselves again with the right JVM args
-        let current_exe = err! {
-            std::env::current_exe()
-            => "Failed to get path to current executable"
-        }?;
+        let current_exe =
+            std::env::current_exe().err_ctx(|| "Failed to get path to current executable")?;
         let aot_conf_file = match aot_conf_file.to_str() {
             Some(f) => f,
             None => return generic!("Failed to convert AOT config file to String"),
@@ -457,19 +456,13 @@ fn write_meta_file(args: &AotRecordingArgs) -> Result<(), Error> {
         cmd.args(&["-jar", args.jar.as_str()]);
 
         let (mut reader, writer) = os_pipe::pipe()?;
-        cmd.stdout(writer.try_clone().loc(l!())?);
+        cmd.stdout(writer.try_clone()?);
         cmd.stderr(writer);
-        let mut child = err! {
-            cmd.spawn()
-            => "Failed to create child process"
-        }?;
+        let mut child = cmd.spawn().err_ctx("Failed to create child process")?;
 
         log_jvm(&jvm, LogKind::Info, "Creating AOT cache file...");
 
-        let exit_status = err! {
-            child.wait()
-            => "Failed to wait for child process"
-        }?;
+        let exit_status = child.wait().err_ctx("Failed to wait for child process")?;
         drop(cmd); // drops both writers with it (will deadlock otherwise)
 
         if !exit_status.success() {
@@ -499,20 +492,18 @@ fn write_meta_file(args: &AotRecordingArgs) -> Result<(), Error> {
             return generic!("No AOT cache file found after recording!");
         }
 
-        let meta = err! {
-            AotMeta::build(
-                &args.java_home,
-                &args.classpath,
-                &args.jvm_args,
-                &args.app_args,
-                &aot_cache_file,
-            ) => "Failed to generate AOT cache meta"
-        }?;
+        let meta = AotMeta::build(
+            &args.java_home,
+            &args.classpath,
+            &args.jvm_args,
+            &args.app_args,
+            &aot_cache_file,
+        )
+        .err_ctx("Failed to generate AOT cache meta")?;
 
         let aot_meta_file = AotMeta::aot_meta_file(&args.repo_dir);
-        if let Err(e) = meta.write(&aot_meta_file) {
-            return l!(Err(Error::wrap("Failed to write AOT cache meta", e)));
-        };
+        meta.write(&aot_meta_file)
+            .err_ctx("Failed to write AOT cache meta")?;
 
         log_jvm(&jvm, LogKind::Info, "AOT cache meta written successfully.");
         log_jvm(&jvm, LogKind::Info, "AOT cache recording complete!");
@@ -536,10 +527,7 @@ fn log_jvm(jvm: &JavaVM, kind: LogKind, msg: &str) {
         },
         None,
         |env| {
-            let logger = err! {
-                get_logger(env)
-                => "Failed to get logger"
-            }?;
+            let logger = get_logger(env)?;
 
             let method = match kind {
                 LogKind::Info => jni_str!("info"),
@@ -564,7 +552,7 @@ fn log_jvm(jvm: &JavaVM, kind: LogKind, msg: &str) {
                 )?;
             }
 
-            let message = l!(env.new_string(msg))?;
+            let message = env.new_string(msg)?;
             env.call_method(
                 &logger,
                 method,
@@ -595,11 +583,7 @@ fn log_jvm(jvm: &JavaVM, kind: LogKind, msg: &str) {
 
 fn end_aot_recording(jvm: &JavaVM, compat: bool) -> Result<bool, Error> {
     let mut scope = ScopeToken::default();
-    let mut guard = l!(jni_attach_thread(
-        jvm,
-        &mut scope,
-        jni_str!("aot-cache-checker")
-    ))?;
+    let mut guard = jni_attach_thread(jvm, &mut scope, jni_str!("aot-cache-checker"))?;
     let env = guard.borrow_env_mut();
 
     log_jvm(
@@ -608,8 +592,7 @@ fn end_aot_recording(jvm: &JavaVM, compat: bool) -> Result<bool, Error> {
         "AOT cache recording ended. Writing AOT config file...",
     );
 
-    let aot_cache_bean_class =
-        l!(env.find_class(jni_str!("jdk/management/HotSpotAOTCacheMXBean")))?;
+    let aot_cache_bean_class = env.find_class(jni_str!("jdk/management/HotSpotAOTCacheMXBean"))?;
     // Trigger record
     let aot_cache_bean = env
         .call_static_method(
@@ -617,10 +600,8 @@ fn end_aot_recording(jvm: &JavaVM, compat: bool) -> Result<bool, Error> {
             jni_str!("getPlatformMXBean"),
             jni_sig!("(Ljava/lang/Class;)Ljava/lang/management/PlatformManagedObject;"),
             &[JValue::Object(&aot_cache_bean_class)],
-        )
-        .loc(l!())?
-        .into_object()
-        .loc(l!())?;
+        )?
+        .l()?;
     if aot_cache_bean.is_null() {
         return null!("ManagementFactory", "getPlatformMXBean()");
     }
@@ -631,10 +612,8 @@ fn end_aot_recording(jvm: &JavaVM, compat: bool) -> Result<bool, Error> {
             jni_str!("endRecording"),
             jni_sig!("()Z"),
             &[],
-        )
-        .loc(l!())?
-        .z()
-        .loc(l!())?;
+        )?
+        .z()?;
 
     // Check if there were errors writing the AOT file
     let is_ok = check_logs_for_errors().unwrap_or_else(|e| {
@@ -667,34 +646,31 @@ fn check_logs_for_errors() -> Result<bool, Error> {
         return generic!("No AOT log file found");
     }
 
-    err! {
-        try {
-            let file = File::open(&log_file)?;
-            let reader = BufReader::new(file);
-            for line in reader.lines() {
-                let line = line?;
-                if line.contains("[error  ]") {
-                    return Ok(false);
-                }
+    try {
+        let file = File::open(&log_file).into_error()?;
+        let reader = BufReader::new(file);
+        for line in reader.lines() {
+            let line = line.into_error()?;
+            if line.contains("[error  ]") {
+                return Ok(false);
             }
         }
-        => "Failed to check AOT logs for errors"
-    }?;
+    }
+    .err_ctx("Failed to check AOT logs for errors")?;
 
     Ok(true)
 }
 
 fn get_logger<'a>(env: &mut Env<'a>) -> Result<JObject<'a>, Error> {
-    let logger_name = l!(env.new_string("AOT"))?;
+    let logger_name = env.new_string("AOT")?;
     env.call_static_method(
         jni_str!("org/slf4j/LoggerFactory"),
         jni_str!("getLogger"),
         jni_sig!("(Ljava/lang/String;)Lorg/slf4j/Logger;"),
         &[JValue::Object(&logger_name)],
-    )
-    .loc(l!())?
-    .into_object()
-    .loc(l!())
+    )?
+    .l()
+    .into_error()
 }
 
 // Threading
@@ -706,10 +682,8 @@ fn check_threads_are_running(env: &mut Env) -> Result<bool, Error> {
             jni_str!("getThreadMXBean"),
             jni_sig!("()Ljava/lang/management/ThreadMXBean;"),
             &[],
-        )
-        .loc(l!())?
-        .into_object()
-        .loc(l!())?;
+        )?
+        .l()?;
     if thread_mx_bean.is_null() {
         return null!("ManagementFactory", "getThreadMXBean()");
     }
@@ -720,12 +694,10 @@ fn check_threads_are_running(env: &mut Env) -> Result<bool, Error> {
             jni_str!("dumpAllThreads"),
             jni_sig!("(ZZI)[Ljava/lang/management/ThreadInfo;"),
             &[JValue::Bool(false), JValue::Bool(false), JValue::Int(0)],
-        )
-        .loc(l!())?
-        .into_object()
-        .loc(l!())?;
-    let all_threads = l!(env.cast_local::<JObjectArray>(all_threads))?;
-    let len = l!(all_threads.len(env))?;
+        )?
+        .l()?;
+    let all_threads = env.cast_local::<JObjectArray>(all_threads)?;
+    let len = all_threads.len(env)?;
 
     if len == 0 {
         return Ok(false);
@@ -736,18 +708,16 @@ fn check_threads_are_running(env: &mut Env) -> Result<bool, Error> {
             jni_str!("java/lang/Thread$State"),
             jni_str!("TERMINATED"),
             jni_sig!("Ljava/lang/Thread$State;"),
-        )
-        .loc(l!())?
-        .into_object()
-        .loc(l!())?;
+        )?
+        .l()?;
 
     for i in 0..len {
-        let thread_info = l!(all_threads.get_element(env, i))?;
+        let thread_info = all_threads.get_element(env, i)?;
         if thread_info.is_null() {
             continue;
         }
 
-        let thread_name = l!(thread_name(env, &thread_info))?;
+        let thread_name = thread_name(env, &thread_info)?;
         if thread_name != "Server thread" {
             continue;
         }
@@ -758,15 +728,13 @@ fn check_threads_are_running(env: &mut Env) -> Result<bool, Error> {
                 jni_str!("getThreadState"),
                 jni_sig!("()Ljava/lang/Thread$State;"),
                 &[],
-            )
-            .loc(l!())?
-            .into_object()
-            .loc(l!())?;
+            )?
+            .l()?;
         if thread_state.is_null() {
             return null!("ThreadInfo", "getThreadState()");
         }
 
-        let is_terminated = l!(env.is_same_object(&terminated, &thread_state))?;
+        let is_terminated = env.is_same_object(&terminated, &thread_state)?;
         if !is_terminated {
             // At least one thread is still running
             return Ok(true);
@@ -783,15 +751,13 @@ fn thread_name(env: &mut Env, thread_info: &JObject) -> Result<String, Error> {
             jni_str!("getThreadName"),
             jni_sig!("()Ljava/lang/String;"),
             &[],
-        )
-        .loc(l!())?
-        .into_object()
-        .loc(l!())?;
+        )?
+        .l()?;
     if thread_name.is_null() {
         return null!("ThreadInfo", "getThreadName()");
     }
-    let thread_name = l!(env.cast_local::<JString>(thread_name))?;
-    let thread_name = l!(thread_name.mutf8_chars(env))?;
+    let thread_name = env.cast_local::<JString>(thread_name)?;
+    let thread_name = thread_name.mutf8_chars(env)?;
     let thread_name = thread_name.to_str();
     Ok(thread_name.to_string())
 }

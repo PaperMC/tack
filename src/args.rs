@@ -15,8 +15,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-use crate::ONLY_USE_AOT_FAILED_EXIT_CODE;
-use crate::errors::Error;
+use crate::errors::{Error, ONLY_USE_AOT_FAILED_EXIT_CODE};
+use crate::generic;
 use crate::util::ComposingIterator;
 use indoc::indoc;
 use std::fs::File;
@@ -181,10 +181,7 @@ fn args_file(arg: &str, target: &mut Vec<String>) -> Result<(), Error> {
     let file = File::open(filepath)?;
     let metadata = file.metadata()?;
     if metadata.len() > 2_147_483_647 {
-        return Err(Error::Generic(format!(
-            "Argument file {} exceeds maximum size of 2147483647 bytes",
-            filepath
-        )));
+        return generic!("Argument file {filepath} exceeds maximum size of 2147483647 bytes");
     }
 
     let reader = BufReader::new(file);

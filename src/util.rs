@@ -15,8 +15,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-use crate::errors::{Error, ErrorLoc};
-use crate::{err, generic, l};
+use crate::errors::{Error, IntoError, WithContext};
+use crate::generic;
 use digest_io::IoWrapper;
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
@@ -37,7 +37,7 @@ pub fn copy_owned<S: ToString>(slice: &[S]) -> Vec<String> {
 }
 
 pub fn parse_hex(s: &str) -> Result<[u8; 32], Error> {
-    let decoded = l!(hex::decode(s))?;
+    let decoded = hex::decode(s)?;
     if decoded.len() != 32 {
         return generic!("Invalid hex string (not 32 bytes long): {s}");
     }
@@ -47,38 +47,33 @@ pub fn parse_hex(s: &str) -> Result<[u8; 32], Error> {
 }
 
 pub fn parse_hex_named(name: &str, s: &str) -> Result<[u8; 32], Error> {
-    err! {
-        parse_hex(s)
-        => format!("Failed to parse hex string '{name}': {s}")
-    }
+    parse_hex(s).err_ctx(|| format!("Failed to parse hex string '{name}': {s}"))
 }
 
 pub fn file_hash(path: &Path) -> Result<[u8; 32], Error> {
-    err! {
-        try {
-            let mut file = open_file(path).loc(l!())?;
-            let mut digest = IoWrapper(Sha256::new());
+    try {
+        let mut file = open_file(path)?;
+        let mut digest = IoWrapper(Sha256::new());
 
-            std::io::copy(&mut file, &mut digest).loc(l!())?;
-            let mut hash: [u8; 32] = [0u8; 32];
-            hash.copy_from_slice(&digest.0.finalize().0);
-            Ok(hash)
-        } => format!("Failed to hash file {}", path.display())
-    }?
+        std::io::copy(&mut file, &mut digest).into_error()?;
+        let mut hash: [u8; 32] = [0u8; 32];
+        hash.copy_from_slice(&digest.0.finalize().0);
+        hash
+    }
+    .err_ctx(|| format!("Failed to hash file {}", path.display()))
 }
 
 pub fn file_matches_hash(path: &Path, expected_hash: &[u8]) -> Result<bool, Error> {
-    err! {
-        try {
-            let mut file = open_file(path).loc(l!())?;
-            let mut digest = IoWrapper(Sha256::new());
+    try {
+        let mut file = open_file(path)?;
+        let mut digest = IoWrapper(Sha256::new());
 
-            std::io::copy(&mut file, &mut digest).loc(l!())?;
-            let actual_hash = digest.0.finalize();
+        std::io::copy(&mut file, &mut digest).into_error()?;
+        let actual_hash = digest.0.finalize();
 
-            Ok(expected_hash == actual_hash.0)
-        } => "Failed to hash file"
-    }?
+        expected_hash == actual_hash.0
+    }
+    .err_ctx("Failed to hash file")
 }
 
 pub fn bytes_matches_hash(data: &[u8], expected_hash: &[u8]) -> bool {
@@ -95,21 +90,24 @@ pub fn extract_zip_entry(
     destination: &Path,
 ) -> Result<(), Error> {
     if entry.is_dir() {
-        create_directory(destination).loc(l!())?;
+        create_directory(destination)?;
         return Ok(());
     }
 
     if let Some(parent) = destination.parent()
         && !parent.exists()
     {
-        create_directory(parent).loc(l!())?;
+        create_directory(parent)?;
     }
 
-    let mut out_file = create_file(destination).loc(l!())?;
-    err! {
-        std::io::copy(entry, &mut out_file)
-        => format!("Failed to extract {} from zip to {}", internal_path, destination.display())
-    }?;
+    let mut out_file = create_file(destination)?;
+    std::io::copy(entry, &mut out_file).err_ctx(|| {
+        format!(
+            "Failed to extract {} from zip to {}",
+            internal_path,
+            destination.display()
+        )
+    })?;
 
     Ok(())
 }
@@ -163,38 +161,24 @@ impl<I> Iterator for ComposingIterator<I> {
 // File operations
 
 pub fn create_directory(path: &Path) -> Result<(), Error> {
-    err! {
-        std::fs::create_dir_all(path)
-        => format!("Failed to create directory: {}", path.display())
-    }
+    std::fs::create_dir_all(path)
+        .err_ctx(|| format!("Failed to create directory: {}", path.display()))
 }
 
 pub fn write_file(path: &Path, data: &[u8]) -> Result<(), Error> {
-    err! {
-        std::fs::write(path, data)
-        => format!("Failed to write file: {}", path.display())
-    }
+    std::fs::write(path, data).err_ctx(|| format!("Failed to write file: {}", path.display()))
 }
 
 pub fn create_file(path: &Path) -> Result<File, Error> {
-    err! {
-        File::create(path)
-        => format!("Failed to create file: {}", path.display())
-    }
+    File::create(path).err_ctx(|| format!("Failed to create file: {}", path.display()))
 }
 
 pub fn open_file(path: &Path) -> Result<File, Error> {
-    err! {
-        File::open(path)
-        => format!("Failed to open file: {}", path.display())
-    }
+    File::open(path).err_ctx(|| format!("Failed to open file: {}", path.display()))
 }
 
 pub fn open_zip(path: &Path) -> Result<ZipArchive<File>, Error> {
-    err! {
-        ZipArchive::new(open_file(path).loc(l!())?)
-        => format!("Failed to open zip: {}", path.display())
-    }
+    ZipArchive::new(open_file(path)?).err_ctx(|| format!("Failed to open zip: {}", path.display()))
 }
 
 pub fn find_zip_entry<'a>(
@@ -202,14 +186,12 @@ pub fn find_zip_entry<'a>(
     name: &str,
 ) -> Result<Option<ZipFile<'a, File>>, Error> {
     let entry = archive.by_name(name);
-    err! {
-        match entry {
-            Ok(entry) => Ok::<Option<ZipFile<'_, File>>, Error>(Some(entry)),
-            Err(ZipError::FileNotFound) => Ok(None),
-            Err(e) => return l!(Err(Error::from(e))),
-        }
-        => format!("Failed to find entry in zip: {}", name)
+    match entry {
+        Ok(entry) => Ok::<Option<ZipFile<'_, File>>, Error>(Some(entry)),
+        Err(ZipError::FileNotFound) => Ok(None),
+        Err(e) => return Err(Error::from(e)),
     }
+    .err_ctx(|| format!("Failed to find entry in zip: {}", name))
 }
 
 pub fn require_zip_entry<'a>(
@@ -224,19 +206,15 @@ pub fn require_zip_entry<'a>(
 
 pub fn read_zip_entry(entry: &mut ZipFile<File>) -> Result<Vec<u8>, Error> {
     let mut data = Vec::new();
-    err! {
-        entry.read_to_end(&mut data)
-        => format!("Failed to read entry: {}", entry.name())
-    }?;
+    entry
+        .read_to_end(&mut data)
+        .err_ctx(|| format!("Failed to read entry: {}", entry.name()))?;
     Ok(data)
 }
 
 pub fn read_zip_entry_text(entry: &mut ZipFile<File>) -> Result<String, Error> {
-    let data = l!(read_zip_entry(entry))?;
-    err! {
-        String::from_utf8(data)
-        => format!("Invalid UTF-8 in {}", entry.name())
-    }
+    let data = read_zip_entry(entry)?;
+    String::from_utf8(data).err_ctx(|| format!("Invalid UTF-8 in {}", entry.name()))
 }
 
 #[cfg(not(target_os = "windows"))]
