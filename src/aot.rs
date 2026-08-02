@@ -25,7 +25,8 @@ use jni::{AttachConfig, Env, JValue, JavaVM, ScopeToken, jni_sig, jni_str};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::io::{BufRead, Read};
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -440,12 +441,20 @@ fn write_meta_file(args: &AotRecordingArgs) -> Result<(), Error> {
                 "-XX:-AOTInvokeDynamicLinking",
             ]);
         }
+
+        args.jvm_args
+            .iter()
+            .filter(|arg| arg.starts_with("-XX:"))
+            .for_each(|arg| {
+                cmd.arg(arg);
+            });
+
         cmd.args(&[
             format!("-XX:AOTConfiguration={aot_conf_file}").as_str(),
             format!("-XX:AOTCache={aot_cache_file}").as_str(),
-            "-jar",
-            args.jar.as_str(),
         ]);
+
+        cmd.args(&["-jar", args.jar.as_str()]);
 
         let (mut reader, writer) = os_pipe::pipe()?;
         cmd.stdout(writer.try_clone().loc(l!())?);
@@ -653,34 +662,19 @@ fn end_aot_recording(jvm: &JavaVM, compat: bool) -> Result<bool, Error> {
 }
 
 fn check_logs_for_errors() -> Result<bool, Error> {
-    let log_dir = Path::new(".paper").join("logs");
-    if !log_dir.exists() {
-        return generic!("No AOT logs directory found");
+    let log_file = Path::new(".paper").join("logs").join("aot-record.log");
+    if !log_file.exists() {
+        return generic!("No AOT log file found");
     }
 
     err! {
         try {
-            for entry in std::fs::read_dir(&log_dir)? {
-                let path = entry?.path();
-                if !path.is_file() {
-                    continue;
-                }
-                let file_name = path.file_name();
-                if file_name.is_none() {
-                    continue;
-                }
-                let file_name = file_name.unwrap();
-                if !file_name.to_string_lossy().ends_with(".log") {
-                    continue;
-                }
-
-                let file = std::fs::File::open(&path)?;
-                let reader = std::io::BufReader::new(file);
-                for line in reader.lines() {
-                    let line = line?;
-                    if line.contains("[error  ]") {
-                        return Ok(false);
-                    }
+            let file = File::open(&log_file)?;
+            let reader = BufReader::new(file);
+            for line in reader.lines() {
+                let line = line?;
+                if line.contains("[error  ]") {
+                    return Ok(false);
                 }
             }
         }
