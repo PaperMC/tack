@@ -276,214 +276,35 @@ pub fn check_aot_opt(
     }
 }
 
-pub struct AotRecordingArgs<'a> {
+pub struct AotRecordingArgs {
     pub jvm: Arc<JavaVM>,
-    pub java_home: &'a str,
-    pub jar: &'a str,
-    pub repo_dir: &'a Path,
-    pub classpath: &'a [OsString],
-    pub jvm_args: &'a [String],
-    pub app_args: &'a [String],
+    pub java_home: String,
+    pub jar: String,
+    pub repo_dir: PathBuf,
+    pub classpath: Vec<OsString>,
+    pub jvm_args: Vec<String>,
+    pub app_args: Vec<String>,
     pub mode: RecordMode,
-    pub aot_conf_file: &'a Path,
+    pub aot_conf_file: PathBuf,
     pub compat: bool,
 }
 
 pub fn setup_auto_recording(args: AotRecordingArgs) -> Option<JoinHandle<Result<(), Error>>> {
-    let aot_meta_file = AotMeta::aot_meta_file(args.repo_dir);
-
+    let aot_meta_file = AotMeta::aot_meta_file(&args.repo_dir);
     if aot_meta_file.exists() {
         return None;
     }
 
-    // Make copies to pass to the other thread
-    let jvm_cache_checker = args.jvm.clone();
-    let java_home = args.java_home.to_string();
-    let jar = args.jar.to_string();
-    let repo_dir = args.repo_dir.to_path_buf();
-    let classpath = args.classpath.to_vec();
-    let jvm_args = copy_owned(args.jvm_args);
-    let app_args = copy_owned(args.app_args);
-    let aot_conf_file = args.aot_conf_file.to_path_buf();
-
     let meta_thread_handle = std::thread::spawn(move || -> Result<(), Error> {
-        let watchdog_thread = jni_str!("org/spigotmc/WatchdogThread");
-        let has_started_field = jni_str!("hasStarted");
-        let has_started_sig = jni_sig!("Z");
-
-        loop {
-            std::thread::sleep(Duration::from_millis(100));
-            // We don't stay attached, so if the server stops early, `jvm.destroy()` won't be deadlocked waiting
-            // for us to release the last non-daemon thread.
-
-            let mut scope = ScopeToken::default();
-            let mut guard = l!(jni_attach_thread(
-                &jvm_cache_checker,
-                &mut scope,
-                jni_str!("aot-cache-checker"),
-            ))?;
-            let env = guard.borrow_env_mut();
-
-            // While we are waiting, we need to make sure the `main` and `Server thread` threads are still running.
-            // If both threads are gone, that means the server has crashed.
-            if !check_threads_are_running(env).loc(l!())? {
-                return Ok(());
-            }
-
-            let has_started = env
-                .get_static_field(watchdog_thread, has_started_field, &has_started_sig)
-                .loc(l!())?
-                .z();
-            match has_started {
-                Ok(true) => break,
-                Ok(false) => continue,
-                Err(jni::errors::Error::JavaException) => {
-                    env.exception_clear(); // ignore it
-                    continue;
-                }
-                Err(e) => return l!(Err(Error::from(e))),
-            };
-        }
-
-        // Server has completed starting
-
-        let ended_recording = end_aot_recording(&jvm_cache_checker, args.compat);
-        let ended_recording = match ended_recording {
-            Ok(r) => r,
-            Err(e) => {
-                return l!(Err(Error::wrap("Failed to end AOT cache recording", e)));
-            }
-        };
-
-        if ended_recording {
-            // Recording is done, we need to create the AOT cache now
-            // We do that by calling ourselves again with the right JVM args
-            let current_exe = err! {
-                std::env::current_exe()
-                => "Failed to get path to current executable"
-            }?;
-            let aot_conf_file = match aot_conf_file.to_str() {
-                Some(f) => f,
-                None => return generic!("Failed to convert AOT config file to String"),
-            };
-            let aot_cache_file = AotMeta::aot_cache_file(&repo_dir);
-            let aot_cache_file = match aot_cache_file.to_str() {
-                Some(f) => f,
-                None => return generic!("Failed to convert AOT cache file to String"),
-            };
-
-            {
-                let aot_logs_dir = Path::new(".paper").join("logs");
-                if aot_logs_dir.exists() {
-                    let create_log = aot_logs_dir.join("aot-create.log");
-                    if create_log.exists()
-                        && let Err(e) = std::fs::remove_file(&create_log)
-                    {
-                        eprintln!("Failed to delete existing aot-create.log file: {e}");
-                    }
-                } else {
-                    let _ = std::fs::create_dir_all(&aot_logs_dir);
-                }
-            }
-
-            let mut cmd = Command::new(current_exe);
-            cmd.args(&[
-                "--no-aot",
-                "-Xlog:aot*=off",
-                "-Xlog:aot*=info:file=.paper/logs/aot-create.log",
-                "-XX:AOTMode=create",
-            ]);
-            if args.compat {
-                cmd.args(&[
-                    "-XX:+UnlockDiagnosticVMOptions",
-                    "-XX:-AOTInvokeDynamicLinking",
-                ]);
-            }
-            cmd.args(&[
-                format!("-XX:AOTConfiguration={aot_conf_file}").as_str(),
-                format!("-XX:AOTCache={aot_cache_file}").as_str(),
-                "-jar",
-                jar.as_str(),
-            ]);
-
-            let (mut reader, writer) = os_pipe::pipe()?;
-            cmd.stdout(writer.try_clone().loc(l!())?);
-            cmd.stderr(writer);
-            let mut child = err! {
-                cmd.spawn()
-                => "Failed to create child process"
-            }?;
-
-            log_jvm(
-                &jvm_cache_checker,
-                LogKind::Info,
-                "Creating AOT cache file...",
-            );
-
-            let exit_status = err! {
-                child.wait()
-                => "Failed to wait for child process"
-            }?;
-            drop(cmd); // drops both writers with it (will deadlock otherwise)
-
-            if !exit_status.success() {
-                let mut combined_output = String::new();
-                reader.read_to_string(&mut combined_output)?;
-                let mut msg =
-                    "Failed to record AOT cache. Check logs at '.paper/logs/aot-create.log'."
-                        .to_string();
-                if !args.compat {
-                    msg.push_str("\nYou can try using '--aot-compat'.");
-                }
-                if !combined_output.is_empty() {
-                    msg.push_str("\n");
-                    msg.push_str(combined_output.trim());
-                }
-                log_jvm(&jvm_cache_checker, LogKind::Error, &msg);
-                return generic!("Failed to create AOT cache");
-            }
-
-            log_jvm(
-                &jvm_cache_checker,
-                LogKind::Info,
-                "AOT cache file written successfully, writing meta file...",
-            );
-
-            let aot_cache_file = AotMeta::aot_cache_file(&repo_dir);
-            if !aot_cache_file.exists() {
-                return generic!("No AOT cache file found after recording!");
-            }
-
-            let meta = err! {
-                AotMeta::build(
-                    &java_home,
-                    &classpath,
-                    &jvm_args,
-                    &app_args,
-                    &aot_cache_file,
-                ) => "Failed to generate AOT cache meta"
-            }?;
-
-            if let Err(e) = meta.write(&aot_meta_file) {
-                return l!(Err(Error::wrap("Failed to write AOT cache meta", e)));
-            };
-
-            log_jvm(
-                &jvm_cache_checker,
-                LogKind::Info,
-                "AOT cache meta written successfully.",
-            );
-            log_jvm(
-                &jvm_cache_checker,
-                LogKind::Info,
-                "AOT cache recording complete!",
-            );
+        let res = &write_meta_file(&args);
+        if let Err(e) = res {
+            eprintln!("Failed to write AOT cache: {e}");
         }
 
         // For only record, stop the server
         match args.mode {
             RecordMode::OnlyRecord | RecordMode::ForceRecord => {
-                let _: Result<(), Error> = jvm_cache_checker.attach_current_thread(|env| {
+                let _: Result<(), Error> = args.jvm.attach_current_thread(|env| {
                     let minecraft_server = env
                         .get_static_field(
                             jni_str!("net/minecraft/server/MinecraftServer"),
@@ -496,8 +317,16 @@ pub fn setup_auto_recording(args: AotRecordingArgs) -> Option<JoinHandle<Result<
                     if minecraft_server.is_null() {
                         return Ok(());
                     }
+                    if res.is_err() {
+                        let _ = env.set_field(
+                            &minecraft_server,
+                            jni_str!("abnormalExit"),
+                            jni_sig!("Z"),
+                            JValue::Bool(true),
+                        );
+                    };
                     env.call_method(
-                        minecraft_server,
+                        &minecraft_server,
                         jni_str!("halt"),
                         jni_sig!("(Z)V"),
                         &[JValue::Bool(true)],
@@ -505,7 +334,6 @@ pub fn setup_auto_recording(args: AotRecordingArgs) -> Option<JoinHandle<Result<
                     .loc(l!())?;
                     Ok(())
                 });
-                return Ok(());
             }
             _ => {}
         }
@@ -513,6 +341,175 @@ pub fn setup_auto_recording(args: AotRecordingArgs) -> Option<JoinHandle<Result<
         Ok(())
     });
     Some(meta_thread_handle)
+}
+
+fn write_meta_file(args: &AotRecordingArgs) -> Result<(), Error> {
+    let jvm = args.jvm.clone();
+
+    let aot_conf_file = &args.aot_conf_file;
+
+    let watchdog_thread = jni_str!("org/spigotmc/WatchdogThread");
+    let has_started_field = jni_str!("hasStarted");
+    let has_started_sig = jni_sig!("Z");
+
+    loop {
+        std::thread::sleep(Duration::from_millis(100));
+        // We don't stay attached, so if the server stops early, `jvm.destroy()` won't be deadlocked waiting
+        // for us to release the last non-daemon thread.
+
+        let mut scope = ScopeToken::default();
+        let mut guard = l!(jni_attach_thread(
+            &jvm,
+            &mut scope,
+            jni_str!("aot-cache-checker")
+        ))?;
+        let env = guard.borrow_env_mut();
+
+        // While we are waiting, we need to make sure the `main` and `Server thread` threads are still running.
+        // If both threads are gone, that means the server has crashed.
+        if !check_threads_are_running(env).loc(l!())? {
+            return Ok(());
+        }
+
+        let has_started = env
+            .get_static_field(watchdog_thread, has_started_field, &has_started_sig)
+            .loc(l!())?
+            .z();
+        match has_started {
+            Ok(true) => break,
+            Ok(false) => continue,
+            Err(jni::errors::Error::JavaException) => {
+                env.exception_clear(); // ignore it
+                continue;
+            }
+            Err(e) => return l!(Err(Error::from(e))),
+        };
+    }
+
+    // Server has completed starting
+
+    let ended_recording = end_aot_recording(&jvm, args.compat);
+    let ended_recording = match ended_recording {
+        Ok(r) => r,
+        Err(e) => {
+            return l!(Err(Error::wrap("Failed to end AOT cache recording", e)));
+        }
+    };
+
+    if ended_recording {
+        // Recording is done, we need to create the AOT cache now
+        // We do that by calling ourselves again with the right JVM args
+        let current_exe = err! {
+            std::env::current_exe()
+            => "Failed to get path to current executable"
+        }?;
+        let aot_conf_file = match aot_conf_file.to_str() {
+            Some(f) => f,
+            None => return generic!("Failed to convert AOT config file to String"),
+        };
+        let aot_cache_file = AotMeta::aot_cache_file(&args.repo_dir);
+        let aot_cache_file = match aot_cache_file.to_str() {
+            Some(f) => f,
+            None => return generic!("Failed to convert AOT cache file to String"),
+        };
+
+        {
+            let aot_logs_dir = Path::new(".paper").join("logs");
+            if aot_logs_dir.exists() {
+                let create_log = aot_logs_dir.join("aot-create.log");
+                if create_log.exists()
+                    && let Err(e) = std::fs::remove_file(&create_log)
+                {
+                    eprintln!("Failed to delete existing aot-create.log file: {e}");
+                }
+            } else {
+                let _ = std::fs::create_dir_all(&aot_logs_dir);
+            }
+        }
+
+        let mut cmd = Command::new(current_exe);
+        cmd.args(&[
+            "--no-aot",
+            "-Xlog:aot*=off",
+            "-Xlog:aot*=info:file=.paper/logs/aot-create.log",
+            "-XX:AOTMode=create",
+        ]);
+        if args.compat {
+            cmd.args(&[
+                "-XX:+UnlockDiagnosticVMOptions",
+                "-XX:-AOTInvokeDynamicLinking",
+            ]);
+        }
+        cmd.args(&[
+            format!("-XX:AOTConfiguration={aot_conf_file}").as_str(),
+            format!("-XX:AOTCache={aot_cache_file}").as_str(),
+            "-jar",
+            args.jar.as_str(),
+        ]);
+
+        let (mut reader, writer) = os_pipe::pipe()?;
+        cmd.stdout(writer.try_clone().loc(l!())?);
+        cmd.stderr(writer);
+        let mut child = err! {
+            cmd.spawn()
+            => "Failed to create child process"
+        }?;
+
+        log_jvm(&jvm, LogKind::Info, "Creating AOT cache file...");
+
+        let exit_status = err! {
+            child.wait()
+            => "Failed to wait for child process"
+        }?;
+        drop(cmd); // drops both writers with it (will deadlock otherwise)
+
+        if !exit_status.success() {
+            let mut combined_output = String::new();
+            reader.read_to_string(&mut combined_output)?;
+            let mut msg = "Failed to record AOT cache. Check logs at '.paper/logs/aot-create.log'."
+                .to_string();
+            if !args.compat {
+                msg.push_str("\nYou can try using '--aot-compat'.");
+            }
+            if !combined_output.is_empty() {
+                msg.push_str("\n");
+                msg.push_str(combined_output.trim());
+            }
+            log_jvm(&jvm, LogKind::Error, &msg);
+            return generic!("Failed to create AOT cache");
+        }
+
+        log_jvm(
+            &jvm,
+            LogKind::Info,
+            "AOT cache file written successfully, writing meta file...",
+        );
+
+        let aot_cache_file = AotMeta::aot_cache_file(&args.repo_dir);
+        if !aot_cache_file.exists() {
+            return generic!("No AOT cache file found after recording!");
+        }
+
+        let meta = err! {
+            AotMeta::build(
+                &args.java_home,
+                &args.classpath,
+                &args.jvm_args,
+                &args.app_args,
+                &aot_cache_file,
+            ) => "Failed to generate AOT cache meta"
+        }?;
+
+        let aot_meta_file = AotMeta::aot_meta_file(&args.repo_dir);
+        if let Err(e) = meta.write(&aot_meta_file) {
+            return l!(Err(Error::wrap("Failed to write AOT cache meta", e)));
+        };
+
+        log_jvm(&jvm, LogKind::Info, "AOT cache meta written successfully.");
+        log_jvm(&jvm, LogKind::Info, "AOT cache recording complete!");
+    }
+
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -644,7 +641,8 @@ fn end_aot_recording(jvm: &JavaVM, compat: bool) -> Result<bool, Error> {
             "AOT cache config recorded successfully.",
         );
     } else {
-        let mut msg = "AOT cache file writing failed. Check logs at '.paper/logs/aot-record.log'.".to_string();
+        let mut msg = "AOT cache file writing failed. Check logs at '.paper/logs/aot-record.log'."
+            .to_string();
         if !compat {
             msg.push_str("\nYou can try using '--aot-compat'.")
         }

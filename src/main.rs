@@ -178,26 +178,26 @@ fn run() -> i32 {
         let server_thread = start_jvm_thread(jvm.clone(), &meta.main_class, &app_args);
         let server_thread_res = server_thread.join_res();
 
-        let meta_thread_res = if let AotCacheAction::Record {
-            aot_conf_file,
-            compat,
-        } = aot_action
-        {
-            let meta_thread = setup_auto_recording(AotRecordingArgs {
-                jvm: jvm.clone(),
-                java_home: &java_home,
-                jar: &arg_opts.jar,
-                repo_dir: &repo_dir,
-                classpath: &classpath,
-                jvm_args: &jvm_args,
-                app_args: &app_args,
-                mode: arg_opts.record,
-                aot_conf_file: &aot_conf_file,
+        let meta_thread_res = match aot_action {
+            AotCacheAction::Record {
+                aot_conf_file,
                 compat,
-            });
-            meta_thread.map(|h| h.join_res())
-        } else {
-            None
+            } => {
+                let meta_thread = setup_auto_recording(AotRecordingArgs {
+                    jvm: jvm.clone(),
+                    java_home,
+                    jar: arg_opts.jar,
+                    repo_dir,
+                    classpath,
+                    jvm_args,
+                    app_args,
+                    mode: arg_opts.record,
+                    aot_conf_file,
+                    compat,
+                });
+                meta_thread.map(|h| h.join_res())
+            }
+            _ => None,
         };
 
         unsafe {
@@ -208,7 +208,7 @@ fn run() -> i32 {
         drop(jvm);
 
         if let Some(Err(ref e)) = meta_thread_res {
-            eprintln!("Error during AOT recording: {e}")
+            eprintln!("Error during AOT recording: {e}");
         }
 
         match server_thread_res {
