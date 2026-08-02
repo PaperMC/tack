@@ -1,0 +1,126 @@
+name: Build
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      build_date: ${{ steps.get_date.outputs.date }}
+    steps:
+      - name: Generate build date
+        id: get_date
+        run: echo "date=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+  build-linux:
+    name: Build ${{ matrix.target }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    container: almalinux:8
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux (x86_64)
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            appimage_arch: x86_64
+          # Linux (aarch64)
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            appimage_arch: aarch64
+    env:
+      CI_BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Install dependencies
+        run: dnf install -y gcc gcc-c++ make openssl-devel libcurl-devel pkgconf-pkg-config git file
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly
+          targets: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: |
+          curl -LO https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-${{ matrix.appimage_arch }}.AppImage
+          chmod +x linuxdeploy-${{ matrix.appimage_arch }}.AppImage
+
+          # Create mandatory AppImage metadata (Replace these inline files with committed assets in your repository)
+          cat > tack.desktop <<EOF
+          [Desktop Entry]
+          Name=tack
+          Exec=tack
+          Icon=tack
+          Type=Application
+          Categories=Utility;
+          EOF
+          echo '<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="50" r="50"/></svg>' > tack.svg
+
+          # Package the binary and copy shared libraries into the AppDir
+          ./linuxdeploy-${{ matrix.appimage_arch }}.AppImage \
+            --appdir AppDir \
+            --executable target/${{ matrix.target }}/release/tack \
+            --desktop-file tack.desktop \
+            --icon-file tack.svg \
+            --output appimage
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: tack-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/tack
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: tack-appimage-${{ matrix.target }}
+          path: tack-${{ matrix.appimage_arch }}.AppImage
+
+  build-native:
+    name: Build ${{ matrix.target }}
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS (x86_64)
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            extension: ""
+          # macOS (aarch64)
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            extension: ""
+          # Windows (x86_64)
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            extension: ".exe"
+          # Windows (aarch64)
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            extension: ".exe"
+    env:
+      CI_BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly
+          targets: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: tack-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/tack${{ matrix.extension }}
