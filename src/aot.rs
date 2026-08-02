@@ -162,8 +162,13 @@ impl AotMeta {
 
 #[derive(Clone)]
 pub enum AotCacheAction {
-    Use { aot_cache_file: PathBuf },
-    Record { aot_conf_file: PathBuf },
+    Use {
+        aot_cache_file: PathBuf,
+    },
+    Record {
+        aot_conf_file: PathBuf,
+        compat: bool,
+    },
     None,
 }
 impl AotCacheAction {
@@ -171,8 +176,11 @@ impl AotCacheAction {
         Self::Use { aot_cache_file }
     }
 
-    pub fn record(aot_conf_file: PathBuf) -> Self {
-        Self::Record { aot_conf_file }
+    pub fn record(aot_conf_file: PathBuf, compat: bool) -> Self {
+        Self::Record {
+            aot_conf_file,
+            compat,
+        }
     }
     pub fn none() -> Self {
         Self::None
@@ -182,6 +190,7 @@ impl AotCacheAction {
 pub fn check_aot_opt(
     repo_dir: &Path,
     mode: RecordMode,
+    compat: bool,
     java_home: &str,
     classpath: &[OsString],
     jvm_args: &[String],
@@ -198,9 +207,9 @@ pub fn check_aot_opt(
 
     if !aot_cache_file.exists() || !aot_meta_file.exists() {
         return match mode {
-            RecordMode::Normal | RecordMode::OnlyRecord | RecordMode::ForceRecord => {
-                Ok(AotCacheAction::record(AotMeta::aot_conf_file(repo_dir)))
-            }
+            RecordMode::Normal | RecordMode::OnlyRecord | RecordMode::ForceRecord => Ok(
+                AotCacheAction::record(AotMeta::aot_conf_file(repo_dir), compat),
+            ),
             RecordMode::Check => Err(Error::Exit(1)),
             RecordMode::OnlyUse => {
                 eprintln!("No AOT cache found");
@@ -227,7 +236,10 @@ pub fn check_aot_opt(
             if current_meta == saved_meta {
                 Ok(AotCacheAction::use_cache(aot_cache_file))
             } else {
-                Ok(AotCacheAction::record(AotMeta::aot_conf_file(repo_dir)))
+                Ok(AotCacheAction::record(
+                    AotMeta::aot_conf_file(repo_dir),
+                    compat,
+                ))
             }
         }
         RecordMode::Check => Err(Error::Exit(if current_meta == saved_meta { 0 } else { 1 })),
@@ -250,10 +262,16 @@ pub fn check_aot_opt(
             if current_meta == saved_meta {
                 Err(Error::Exit(0))
             } else {
-                Ok(AotCacheAction::record(AotMeta::aot_conf_file(repo_dir)))
+                Ok(AotCacheAction::record(
+                    AotMeta::aot_conf_file(repo_dir),
+                    compat,
+                ))
             }
         }
-        RecordMode::ForceRecord => Ok(AotCacheAction::record(AotMeta::aot_conf_file(repo_dir))),
+        RecordMode::ForceRecord => Ok(AotCacheAction::record(
+            AotMeta::aot_conf_file(repo_dir),
+            compat,
+        )),
         RecordMode::NoAot => unreachable!(),
     }
 }
@@ -268,6 +286,7 @@ pub struct AotRecordingArgs<'a> {
     pub app_args: &'a [String],
     pub mode: RecordMode,
     pub aot_conf_file: &'a Path,
+    pub compat: bool,
 }
 
 pub fn setup_auto_recording(args: AotRecordingArgs) -> Option<JoinHandle<Result<(), Error>>> {
@@ -368,16 +387,23 @@ pub fn setup_auto_recording(args: AotRecordingArgs) -> Option<JoinHandle<Result<
             }
 
             let mut cmd = Command::new(current_exe);
-            cmd.args(vec![
+            cmd.args(&[
                 "--no-aot",
                 "-Xlog:aot*=off",
                 "-Xlog:aot*=info:file=.paper/logs/aot-create.log",
                 "-XX:AOTMode=create",
-                format!("-XX:AOTConfiguration={aot_conf_file}").as_str(),
-                format!("-XX:AOTCache={aot_cache_file}").as_str(),
-                "-jar",
-                jar.as_str(),
             ]);
+            if args.compat {
+                cmd.args(&[
+                    "-XX:+UnlockDiagnosticVMOptions",
+                    "-XX:-AOTInvokeDynamicLinking",
+                ]);
+            }
+            cmd.arg(format!("-XX:AOTConfiguration={aot_conf_file}"));
+            cmd.arg(format!("-XX:AOTCache={aot_cache_file}"));
+            cmd.arg("-jar");
+            cmd.arg(jar.as_str());
+
             let (mut reader, writer) = os_pipe::pipe()?;
             cmd.stdout(writer.try_clone().loc(l!())?);
             cmd.stderr(writer);
@@ -401,7 +427,9 @@ pub fn setup_auto_recording(args: AotRecordingArgs) -> Option<JoinHandle<Result<
             if !exit_status.success() {
                 let mut combined_output = String::new();
                 reader.read_to_string(&mut combined_output)?;
-                let mut msg = "Failed to record AOT cache. Check logs at '.paper/logs/aot-create.log'.".to_string();
+                let mut msg =
+                    "Failed to record AOT cache. Check logs at '.paper/logs/aot-create.log'."
+                        .to_string();
                 if !combined_output.is_empty() {
                     msg.push_str("\n");
                     msg.push_str(combined_output.trim());
@@ -563,7 +591,11 @@ fn end_aot_recording(jvm: &JavaVM) -> Result<bool, Error> {
     ))?;
     let env = guard.borrow_env_mut();
 
-    log_jvm(jvm, LogKind::Info, "AOT cache recording ended. Writing AOT config file...");
+    log_jvm(
+        jvm,
+        LogKind::Info,
+        "AOT cache recording ended. Writing AOT config file...",
+    );
 
     let aot_cache_bean_class =
         l!(env.find_class(jni_str!("jdk/management/HotSpotAOTCacheMXBean")))?;
@@ -601,9 +633,17 @@ fn end_aot_recording(jvm: &JavaVM) -> Result<bool, Error> {
     });
 
     if ended && is_ok {
-        log_jvm(jvm, LogKind::Info, "AOT cache config recorded successfully.");
+        log_jvm(
+            jvm,
+            LogKind::Info,
+            "AOT cache config recorded successfully.",
+        );
     } else {
-        log_jvm(jvm, LogKind::Error, "AOT cache file writing failed. Check logs at '.paper/logs/aot-record.log'.");
+        log_jvm(
+            jvm,
+            LogKind::Error,
+            "AOT cache file writing failed. Check logs at '.paper/logs/aot-record.log'.",
+        );
     }
 
     Ok(ended && is_ok)

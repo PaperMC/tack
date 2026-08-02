@@ -28,6 +28,7 @@ pub struct ArgOptions {
     pub jvm_args: Vec<String>,
     pub app_args: Vec<String>,
     pub record: RecordMode,
+    pub compat: bool,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
@@ -56,6 +57,7 @@ pub fn split_args(args: Vec<String>) -> Result<Option<ArgOptions>, Error> {
     let mut jar: Option<String> = None;
     let mut jvm_args = Vec::<String>::new();
     let mut app_args = Vec::<String>::new();
+    let mut compat = false;
 
     let mut args_iter = ComposingIterator::new(Box::new(args.into_iter()));
     let first_arg = args_iter.next().unwrap();
@@ -109,7 +111,22 @@ pub fn split_args(args: Vec<String>) -> Result<Option<ArgOptions>, Error> {
                         _ => unreachable!(),
                     };
                 } else {
-                    app_args.push(arg);
+                    if jar.is_none() {
+                        jvm_args.push(arg);
+                    } else {
+                        app_args.push(arg);
+                    }
+                }
+            }
+            "--aot-compat" => {
+                if jvm_args.is_empty() && app_args.is_empty() && jar.is_none() {
+                    compat = true;
+                } else {
+                    if jar.is_none() {
+                        jvm_args.push(arg);
+                    } else {
+                        app_args.push(arg);
+                    }
                 }
             }
             "-jar" | "--jar" => {
@@ -146,6 +163,7 @@ pub fn split_args(args: Vec<String>) -> Result<Option<ArgOptions>, Error> {
         record: record_preference,
         jvm_args,
         app_args,
+        compat,
     }))
 }
 
@@ -474,6 +492,13 @@ fn print_help(first_arg: String) -> Result<Option<ArgOptions>, Error> {
                              will always record a new cache, even if a valid cache
                              already exists.
               --no-aot       Disable all AOT features completely.
+
+            AOT Compatibility Mode:
+              --aot-comopat  If AOT cache recording fails, you can try with compat
+                             mode enabled. This disables some AOT recording
+                             features, which may allow the recording to complete, at
+                             the cost of slightly reduced performance. This argument
+                             must be provided before any JVM args.
 
             JVM Arguments:
               Any argument that precedes '-jar' after the AOT arguments is passed

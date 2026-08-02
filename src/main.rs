@@ -98,6 +98,7 @@ fn run() -> i32 {
     let aot_action = match check_aot_opt(
         &repo_dir,
         arg_opts.record,
+        arg_opts.compat,
         &java_home,
         &classpath,
         &jvm_args,
@@ -174,14 +175,14 @@ fn run() -> i32 {
                 "Beginning AOT cache recording (This may cause slowdowns while the JVM is recording)..."
             );
         }
-        let server_thread = start_jvm_thread(
-            jvm.clone(),
-            &meta.main_class,
-            &app_args,
-        );
+        let server_thread = start_jvm_thread(jvm.clone(), &meta.main_class, &app_args);
         let server_thread_res = server_thread.join_res();
 
-        let meta_thread_res = if let AotCacheAction::Record { aot_conf_file } = aot_action {
+        let meta_thread_res = if let AotCacheAction::Record {
+            aot_conf_file,
+            compat,
+        } = aot_action
+        {
             let meta_thread = setup_auto_recording(AotRecordingArgs {
                 jvm: jvm.clone(),
                 java_home: &java_home,
@@ -192,6 +193,7 @@ fn run() -> i32 {
                 app_args: &app_args,
                 mode: arg_opts.record,
                 aot_conf_file: &aot_conf_file,
+                compat,
             });
             meta_thread.map(|h| h.join_res())
         } else {
@@ -315,10 +317,18 @@ fn init_jvm(
                 );
             }
         },
-        AotCacheAction::Record { aot_conf_file } => match aot_conf_file.to_str() {
+        AotCacheAction::Record {
+            aot_conf_file,
+            compat,
+        } => match aot_conf_file.to_str() {
             Some(aot_conf_file) => {
+                init_args = init_args.option("-Xlog:aot*=info:file=.paper/logs/aot-record.log");
+                if *compat {
+                    init_args = init_args
+                        .option("-XX:+UnlockDiagnosticVMOptions")
+                        .option("-XX:-AOTInvokeDynamicLinking");
+                }
                 init_args = init_args
-                    .option("-Xlog:aot*=info:file=.paper/logs/aot-record.log")
                     .option("-XX:AOTMode=record")
                     .option(format!("-XX:AOTConfiguration={aot_conf_file}"));
             }
