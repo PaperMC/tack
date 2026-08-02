@@ -25,7 +25,7 @@ use jni::{AttachConfig, Env, JValue, JavaVM, ScopeToken, jni_sig, jni_str};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::io::BufRead;
+use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -33,6 +33,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 
 const AOT_CACHE_FILE: &str = "paper.aot";
+const AOT_CONF_FILE: &str = "paper.aot.config";
 const AOT_CACHE_META: &str = "paper.aot.meta";
 
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
@@ -117,7 +118,9 @@ impl AotMeta {
     pub fn aot_cache_file(dir: &Path) -> PathBuf {
         dir.join(".paper").join("cache").join(AOT_CACHE_FILE)
     }
-
+    pub fn aot_conf_file(dir: &Path) -> PathBuf {
+        dir.join(".paper").join("cache").join(AOT_CONF_FILE)
+    }
     pub fn aot_meta_file(dir: &Path) -> PathBuf {
         dir.join(".paper").join("cache").join(AOT_CACHE_META)
     }
@@ -157,9 +160,10 @@ impl AotMeta {
     }
 }
 
+#[derive(Clone)]
 pub enum AotCacheAction {
     Use { aot_cache_file: PathBuf },
-    Record { aot_cache_file: PathBuf },
+    Record { aot_conf_file: PathBuf },
     None,
 }
 impl AotCacheAction {
@@ -167,8 +171,8 @@ impl AotCacheAction {
         Self::Use { aot_cache_file }
     }
 
-    pub fn record(aot_cache_file: PathBuf) -> Self {
-        Self::Record { aot_cache_file }
+    pub fn record(aot_conf_file: PathBuf) -> Self {
+        Self::Record { aot_conf_file }
     }
     pub fn none() -> Self {
         Self::None
@@ -195,7 +199,7 @@ pub fn check_aot_opt(
     if !aot_cache_file.exists() || !aot_meta_file.exists() {
         return match mode {
             RecordMode::Normal | RecordMode::OnlyRecord | RecordMode::ForceRecord => {
-                Ok(AotCacheAction::record(aot_cache_file))
+                Ok(AotCacheAction::record(AotMeta::aot_conf_file(repo_dir)))
             }
             RecordMode::Check => Err(Error::Exit(1)),
             RecordMode::OnlyUse => {
@@ -223,7 +227,7 @@ pub fn check_aot_opt(
             if current_meta == saved_meta {
                 Ok(AotCacheAction::use_cache(aot_cache_file))
             } else {
-                Ok(AotCacheAction::record(aot_cache_file))
+                Ok(AotCacheAction::record(AotMeta::aot_conf_file(repo_dir)))
             }
         }
         RecordMode::Check => Err(Error::Exit(if current_meta == saved_meta { 0 } else { 1 })),
@@ -246,41 +250,42 @@ pub fn check_aot_opt(
             if current_meta == saved_meta {
                 Err(Error::Exit(0))
             } else {
-                Ok(AotCacheAction::record(aot_cache_file))
+                Ok(AotCacheAction::record(AotMeta::aot_conf_file(repo_dir)))
             }
         }
-        RecordMode::ForceRecord => Ok(AotCacheAction::record(aot_cache_file)),
+        RecordMode::ForceRecord => Ok(AotCacheAction::record(AotMeta::aot_conf_file(repo_dir))),
         RecordMode::NoAot => unreachable!(),
     }
 }
 
-pub fn setup_auto_recording(
-    jvm: Arc<JavaVM>,
-    java_home: &str,
-    classpath: &[OsString],
-    jvm_args: &[String],
-    app_args: &[String],
-    mode: RecordMode,
-) -> Option<JoinHandle<Result<(), Error>>> {
-    let cwd = match std::env::current_dir() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("Failed to find current directory: {}", e);
-            return None;
-        }
-    };
-    let aot_meta_file = AotMeta::aot_meta_file(&cwd);
+pub struct AotRecordingArgs<'a> {
+    pub jvm: Arc<JavaVM>,
+    pub java_home: &'a str,
+    pub jar: &'a str,
+    pub repo_dir: &'a Path,
+    pub classpath: &'a [OsString],
+    pub jvm_args: &'a [String],
+    pub app_args: &'a [String],
+    pub mode: RecordMode,
+    pub aot_conf_file: &'a Path,
+}
+
+pub fn setup_auto_recording(args: AotRecordingArgs) -> Option<JoinHandle<Result<(), Error>>> {
+    let aot_meta_file = AotMeta::aot_meta_file(args.repo_dir);
 
     if aot_meta_file.exists() {
         return None;
     }
 
     // Make copies to pass to the other thread
-    let jvm_cache_checker = jvm.clone();
-    let java_home = java_home.to_string();
-    let classpath = classpath.to_vec();
-    let jvm_args = copy_owned(jvm_args);
-    let app_args = copy_owned(app_args);
+    let jvm_cache_checker = args.jvm.clone();
+    let java_home = args.java_home.to_string();
+    let jar = args.jar.to_string();
+    let repo_dir = args.repo_dir.to_path_buf();
+    let classpath = args.classpath.to_vec();
+    let jvm_args = copy_owned(args.jvm_args);
+    let app_args = copy_owned(args.app_args);
+    let aot_conf_file = args.aot_conf_file.to_path_buf();
 
     let meta_thread_handle = std::thread::spawn(move || -> Result<(), Error> {
         let watchdog_thread = jni_str!("org/spigotmc/WatchdogThread");
@@ -332,61 +337,118 @@ pub fn setup_auto_recording(
         };
 
         if ended_recording {
-            // Recording is done, we need to write the meta file
-            let aot_cache_file = AotMeta::aot_cache_file(&cwd);
+            // Recording is done, we need to create the AOT cache now
+            // We do that by calling ourselves again with the right JVM args
+            let current_exe = err! {
+                std::env::current_exe()
+                => "Failed to get path to current executable"
+            }?;
+            let aot_conf_file = match aot_conf_file.to_str() {
+                Some(f) => f,
+                None => return generic!("Failed to convert AOT config file to String"),
+            };
+            let aot_cache_file = AotMeta::aot_cache_file(&repo_dir);
+            let aot_cache_file = match aot_cache_file.to_str() {
+                Some(f) => f,
+                None => return generic!("Failed to convert AOT cache file to String"),
+            };
+
+            {
+                let aot_logs_dir = Path::new(".paper").join("logs");
+                if aot_logs_dir.exists() {
+                    let create_log = aot_logs_dir.join("aot-create.log");
+                    if create_log.exists()
+                        && let Err(e) = std::fs::remove_file(&create_log)
+                    {
+                        eprintln!("Failed to delete existing aot-create.log file: {e}");
+                    }
+                } else {
+                    let _ = std::fs::create_dir_all(&aot_logs_dir);
+                }
+            }
+
+            let mut cmd = Command::new(current_exe);
+            cmd.args(vec![
+                "--no-aot",
+                "-Xlog:aot*=off",
+                "-Xlog:aot*=info:file=.paper/logs/aot-create.log",
+                "-XX:AOTMode=create",
+                format!("-XX:AOTConfiguration={aot_conf_file}").as_str(),
+                format!("-XX:AOTCache={aot_cache_file}").as_str(),
+                "-jar",
+                jar.as_str(),
+            ]);
+            let (mut reader, writer) = os_pipe::pipe()?;
+            cmd.stdout(writer.try_clone().loc(l!())?);
+            cmd.stderr(writer);
+            let mut child = err! {
+                cmd.spawn()
+                => "Failed to create child process"
+            }?;
+
+            log_jvm(
+                &jvm_cache_checker,
+                LogKind::Info,
+                "Creating AOT cache file...",
+            );
+
+            let exit_status = err! {
+                child.wait()
+                => "Failed to wait for child process"
+            }?;
+            drop(cmd); // drops both writers with it (will deadlock otherwise)
+
+            if !exit_status.success() {
+                let mut combined_output = String::new();
+                reader.read_to_string(&mut combined_output)?;
+                let mut msg = "Failed to record AOT cache. Check logs at '.paper/logs/aot-create.log'.".to_string();
+                if !combined_output.is_empty() {
+                    msg.push_str("\n");
+                    msg.push_str(combined_output.trim());
+                }
+                log_jvm(&jvm_cache_checker, LogKind::Error, &msg);
+                return generic!("Failed to create AOT cache");
+            }
+
+            log_jvm(
+                &jvm_cache_checker,
+                LogKind::Info,
+                "AOT cache file written successfully, writing meta file...",
+            );
+
+            let aot_cache_file = AotMeta::aot_cache_file(&repo_dir);
             if !aot_cache_file.exists() {
                 return generic!("No AOT cache file found after recording!");
             }
 
-            let meta = match AotMeta::build(
-                &java_home,
-                &classpath,
-                &jvm_args,
-                &app_args,
-                &aot_cache_file,
-            ) {
-                Ok(m) => m,
-                Err(e) => {
-                    return l!(Err(Error::wrap("Failed to generate AOT cache meta", e)));
-                }
-            };
+            let meta = err! {
+                AotMeta::build(
+                    &java_home,
+                    &classpath,
+                    &jvm_args,
+                    &app_args,
+                    &aot_cache_file,
+                ) => "Failed to generate AOT cache meta"
+            }?;
 
             if let Err(e) = meta.write(&aot_meta_file) {
                 return l!(Err(Error::wrap("Failed to write AOT cache meta", e)));
             };
 
-            let res: Result<(), Error> = jvm_cache_checker.attach_current_thread_with_config(
-                || {
-                    AttachConfig::default()
-                        .scoped(true)
-                        .thread_name(jni_str!("aot-cache-checker"))
-                },
-                None,
-                |env| {
-                    let logger = err! {
-                        get_logger(env)
-                        => "Failed to get logger"
-                    }?;
-
-                    let message = l!(env.new_string("AOT cache meta written successfully."))?;
-                    env.call_method(
-                        &logger,
-                        jni_str!("info"),
-                        jni_sig!("(Ljava/lang/String;)V"),
-                        &[JValue::Object(&message)],
-                    )
-                    .loc(l!())?;
-
-                    Ok(())
-                },
+            log_jvm(
+                &jvm_cache_checker,
+                LogKind::Info,
+                "AOT cache meta written successfully.",
             );
-            if let Err(e) = res {
-                eprintln!("Error logging message: {e}");
-            }
+            log_jvm(
+                &jvm_cache_checker,
+                LogKind::Info,
+                "AOT cache recording complete!",
+            );
         }
 
         // For only record, stop the server
-        match mode {
+        match args.mode {
             RecordMode::OnlyRecord | RecordMode::ForceRecord => {
                 let _: Result<(), Error> = jvm_cache_checker.attach_current_thread(|env| {
                     let minecraft_server = env
@@ -420,6 +482,78 @@ pub fn setup_auto_recording(
     Some(meta_thread_handle)
 }
 
+#[derive(Clone, Copy, Debug)]
+enum LogKind {
+    Info,
+    Error,
+}
+
+fn log_jvm(jvm: &JavaVM, kind: LogKind, msg: &str) {
+    let res: Result<(), Error> = jvm.attach_current_thread_with_config(
+        || {
+            AttachConfig::default()
+                .scoped(true)
+                .thread_name(jni_str!("aot-cache-checker"))
+        },
+        None,
+        |env| {
+            let logger = err! {
+                get_logger(env)
+                => "Failed to get logger"
+            }?;
+
+            let method = match kind {
+                LogKind::Info => jni_str!("info"),
+                LogKind::Error { .. } => jni_str!("error"),
+            };
+
+            let bar = if let LogKind::Error = kind {
+                let star = "*";
+                let len = msg.lines().next().unwrap_or("").len();
+                let bar = star.repeat(len);
+                Some(env.new_string(bar)?)
+            } else {
+                None
+            };
+
+            if let Some(ref bar) = bar {
+                env.call_method(
+                    &logger,
+                    method,
+                    jni_sig!("(Ljava/lang/String;)V"),
+                    &[JValue::Object(&bar)],
+                )?;
+            }
+
+            let message = l!(env.new_string(msg))?;
+            env.call_method(
+                &logger,
+                method,
+                jni_sig!("(Ljava/lang/String;)V"),
+                &[JValue::Object(&message)],
+            )?;
+
+            if let Some(ref bar) = bar {
+                env.call_method(
+                    &logger,
+                    method,
+                    jni_sig!("(Ljava/lang/String;)V"),
+                    &[JValue::Object(&bar)],
+                )?;
+            }
+
+            Ok(())
+        },
+    );
+    if let Err(_) = res {
+        // We failed to log the message, so just print it
+        match kind {
+            LogKind::Info => println!("{msg}"),
+            LogKind::Error => eprintln!("{msg}"),
+        }
+    }
+}
+
 fn end_aot_recording(jvm: &JavaVM) -> Result<bool, Error> {
     let mut scope = ScopeToken::default();
     let mut guard = l!(jni_attach_thread(
@@ -429,26 +563,7 @@ fn end_aot_recording(jvm: &JavaVM) -> Result<bool, Error> {
     ))?;
     let env = guard.borrow_env_mut();
 
-    let logger = try {
-        let logger = err! {
-            get_logger(env)
-            => "Failed to get logger"
-        }?;
-
-        let message = l!(env.new_string("AOT cache recording ended. Writing AOT file..."))?;
-        env.call_method(
-            &logger,
-            jni_str!("info"),
-            jni_sig!("(Ljava/lang/String;)V"),
-            &[JValue::Object(&message)],
-        )
-        .loc(l!())?;
-
-        logger
-    };
-    if let Err(ref e) = logger {
-        eprintln!("Failed to get logger: {e}");
-    }
+    log_jvm(jvm, LogKind::Info, "AOT cache recording ended. Writing AOT config file...");
 
     let aot_cache_bean_class =
         l!(env.find_class(jni_str!("jdk/management/HotSpotAOTCacheMXBean")))?;
@@ -485,43 +600,10 @@ fn end_aot_recording(jvm: &JavaVM) -> Result<bool, Error> {
         true
     });
 
-    if let Ok(logger) = logger {
-        // Ignore errors here, it's just logging.
-        let _ = try {
-            if ended && is_ok {
-                let message = env.new_string("AOT cache file written successfully.")?;
-                env.call_method(
-                    &logger,
-                    jni_str!("info"),
-                    jni_sig!("(Ljava/lang/String;)V"),
-                    &[JValue::Object(&message)],
-                )
-            } else {
-                let message = "AOT cache file writing failed. Check AOT logs in .paper/logs for more information.";
-                let star = "*";
-                let bar = star.repeat(message.len());
-                let bar = env.new_string(bar)?;
-                let message = env.new_string(message)?;
-                env.call_method(
-                    &logger,
-                    jni_str!("error"),
-                    jni_sig!("(Ljava/lang/String;)V"),
-                    &[JValue::Object(&bar)],
-                )?;
-                env.call_method(
-                    &logger,
-                    jni_str!("error"),
-                    jni_sig!("(Ljava/lang/String;)V"),
-                    &[JValue::Object(&message)],
-                )?;
-                env.call_method(
-                    &logger,
-                    jni_str!("error"),
-                    jni_sig!("(Ljava/lang/String;)V"),
-                    &[JValue::Object(&bar)],
-                )
-            }
-        };
+    if ended && is_ok {
+        log_jvm(jvm, LogKind::Info, "AOT cache config recorded successfully.");
+    } else {
+        log_jvm(jvm, LogKind::Error, "AOT cache file writing failed. Check logs at '.paper/logs/aot-record.log'.");
     }
 
     Ok(ended && is_ok)

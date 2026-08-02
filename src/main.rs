@@ -24,7 +24,7 @@ pub mod errors;
 pub mod jni;
 pub mod util;
 
-use crate::aot::{AotCacheAction, AotMeta, check_aot_opt, setup_auto_recording};
+use crate::aot::{AotCacheAction, AotMeta, AotRecordingArgs, check_aot_opt, setup_auto_recording};
 use crate::args::split_args;
 use crate::classpath::{repo_dir, setup_classpath};
 use crate::errors::Error;
@@ -121,6 +121,10 @@ fn run() -> i32 {
         if cache_file.exists() {
             std::fs::remove_file(&cache_file).unwrap();
         }
+        let conf_file = AotMeta::aot_conf_file(&repo_dir);
+        if conf_file.exists() {
+            std::fs::remove_file(&conf_file).unwrap();
+        }
     }
 
     let jvm_args = copy_owned(&jvm_args);
@@ -130,12 +134,27 @@ fn run() -> i32 {
 
         {
             let aot_logs_dir = Path::new(".paper").join("logs");
-            if aot_logs_dir.exists()
-                && let Err(e) = std::fs::remove_dir_all(&aot_logs_dir)
-            {
-                eprintln!("Failed to delete existing AOT logs directory: {}", e);
-            }
-            if let Err(e) = std::fs::create_dir_all(&aot_logs_dir) {
+            if aot_logs_dir.exists() {
+                match aot_action {
+                    AotCacheAction::Record { .. } => {
+                        let create_log = aot_logs_dir.join("aot-record.log");
+                        if create_log.exists()
+                            && let Err(e) = std::fs::remove_file(&create_log)
+                        {
+                            eprintln!("Failed to delete existing aot-create.log file: {e}");
+                        }
+                    }
+                    AotCacheAction::Use { .. } => {
+                        let use_log = aot_logs_dir.join("aot-use.log");
+                        if use_log.exists()
+                            && let Err(e) = std::fs::remove_file(&use_log)
+                        {
+                            eprintln!("Failed to delete existing aot-use.log file: {e}");
+                        }
+                    }
+                    AotCacheAction::None => {}
+                }
+            } else if let Err(e) = std::fs::create_dir_all(&aot_logs_dir) {
                 eprintln!("Failed to create AOT logs directory: {}", e);
             }
         }
@@ -155,18 +174,29 @@ fn run() -> i32 {
                 "Beginning AOT cache recording (This may cause slowdowns while the JVM is recording)..."
             );
         }
-        let server_thread = start_jvm_thread(jvm.clone(), &meta.main_class, &app_args);
+        let server_thread = start_jvm_thread(
+            jvm.clone(),
+            &meta.main_class,
+            &app_args,
+        );
         let server_thread_res = server_thread.join_res();
 
-        let meta_thread = setup_auto_recording(
-            jvm.clone(),
-            &java_home,
-            &classpath,
-            &jvm_args,
-            &app_args,
-            arg_opts.record,
-        );
-        let meta_thread_res = meta_thread.map(|h| h.join_res());
+        let meta_thread_res = if let AotCacheAction::Record { aot_conf_file } = aot_action {
+            let meta_thread = setup_auto_recording(AotRecordingArgs {
+                jvm: jvm.clone(),
+                java_home: &java_home,
+                jar: &arg_opts.jar,
+                repo_dir: &repo_dir,
+                classpath: &classpath,
+                jvm_args: &jvm_args,
+                app_args: &app_args,
+                mode: arg_opts.record,
+                aot_conf_file: &aot_conf_file,
+            });
+            meta_thread.map(|h| h.join_res())
+        } else {
+            None
+        };
 
         unsafe {
             if let Err(e) = jvm.destroy() {
@@ -265,30 +295,40 @@ fn init_jvm(
         .option("--sun-misc-unsafe-memory-access=allow");
 
     match aot_action {
-        AotCacheAction::Use { aot_cache_file } | AotCacheAction::Record { aot_cache_file } => {
-            match aot_cache_file.to_str() {
-                Some(p) => {
-                    init_args = init_args
-                        .option("-Xlog:aot*=off")
-                        .option("-Xlog:aot*=info:file=.paper/logs/aot-logs.log");
-                    match aot_action {
-                        AotCacheAction::Use { .. } => {
-                            init_args = init_args.option(format!("-XX:AOTCache={p}"))
-                        }
-                        AotCacheAction::Record { .. } => {
-                            init_args = init_args.option(format!("-XX:AOTCacheOutput={p}"))
-                        }
-                        AotCacheAction::None => unreachable!(),
-                    }
-                }
-                None => {
-                    return generic!(
-                        "Failed to convert AOT cache file path to string: {}",
-                        aot_cache_file.display()
-                    );
-                }
-            };
+        AotCacheAction::Use { .. } | AotCacheAction::Record { .. } => {
+            init_args = init_args.option("-Xlog:aot*=off");
         }
+        AotCacheAction::None => {}
+    }
+
+    match aot_action {
+        AotCacheAction::Use { aot_cache_file } => match aot_cache_file.to_str() {
+            Some(aot_cache_file) => {
+                init_args = init_args
+                    .option("-Xlog:aot*=info:file=.paper/logs/aot-use.log")
+                    .option(format!("-XX:AOTCache={aot_cache_file}"));
+            }
+            None => {
+                return generic!(
+                    "Failed to convert AOT cache file path to string: {}",
+                    aot_cache_file.display()
+                );
+            }
+        },
+        AotCacheAction::Record { aot_conf_file } => match aot_conf_file.to_str() {
+            Some(aot_conf_file) => {
+                init_args = init_args
+                    .option("-Xlog:aot*=info:file=.paper/logs/aot-record.log")
+                    .option("-XX:AOTMode=record")
+                    .option(format!("-XX:AOTConfiguration={aot_conf_file}"));
+            }
+            None => {
+                return generic!(
+                    "Failed to convert AOT conf file path to string: {}",
+                    aot_conf_file.display()
+                );
+            }
+        },
         AotCacheAction::None => {}
     }
 

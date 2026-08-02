@@ -22,6 +22,7 @@ digest-io = "0.1.0"
 thiserror = "2.0.19"
 zip = "8.6.0"
 hex = "0.4.3"
+os_pipe = "1.2.3"
 
 serde = { version = "1.0.229", features = ["derive"] }
 postcard = "1.1.3"
