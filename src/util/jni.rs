@@ -170,6 +170,7 @@ pub fn check_java_version(java_home: &str) -> Result<(), Error> {
 
     let version_text = Command::new(&java)
         .arg("-version")
+        .env_clear()
         .output()
         .err_ctx(|| format!("Failed to execute 'java -version' command ({})", java.display()))?;
     let version_text = version_text.stderr;
