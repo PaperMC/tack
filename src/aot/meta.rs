@@ -15,33 +15,24 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-use crate::errors::{Error, IntoError, WithContext};
+use crate::errors::{Error, WithContext};
 use crate::generic;
 use crate::launcher::Launcher;
 use crate::util::fs::{create_directory, file_hash};
 use crate::util::jni::java_bin;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::SystemTime;
 
 const AOT_CACHE_FILE: &str = "paper.aot";
 const AOT_CONF_FILE: &str = "paper.aot.config";
 const AOT_CACHE_META: &str = "paper.aot.meta";
 
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
-struct Fingerprint {
-    hash: [u8; 32],
-    timestamp: u128,
-}
-
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
 pub struct AotMeta {
     jvm_ident: String,
-    classpath: HashMap<PathBuf, Fingerprint>,
     jvm_args: Vec<String>,
-    app_args: Vec<String>,
+    classpath: Vec<[u8; 32]>,
     aot_cache_hash: [u8; 32],
 }
 
@@ -57,7 +48,7 @@ impl AotMeta {
         })?;
         let jvm_ident = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
-        let mut classpath_hashed = HashMap::<PathBuf, Fingerprint>::new();
+        let mut classpath_hashed = Vec::<[u8; 32]>::new();
         for path in launcher.classpath.iter() {
             let file = Path::new(path);
             if !file.exists() {
@@ -67,34 +58,16 @@ impl AotMeta {
                 );
             }
 
-            let meta =
-                std::fs::metadata(path).err_ctx(|| format!("Failed to read file metadata for {}", path.display()))?;
-            let modified_time: u128 = try {
-                meta.modified()
-                    .into_error()?
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .into_error()?
-                    .as_millis()
-            }
-            .err_ctx(|| format!("Failed to read file modification time for {}", path.display()))?;
-
             let hash = file_hash(file)?;
-            classpath_hashed.insert(
-                path.clone(),
-                Fingerprint {
-                    hash,
-                    timestamp: modified_time,
-                },
-            );
+            classpath_hashed.push(hash);
         }
 
         let aot_cache_hash = file_hash(&launcher.aot_files.cache)?;
 
         Ok(AotMeta {
             jvm_ident,
-            classpath: classpath_hashed,
             jvm_args: launcher.args.jvm.iter().map(|s| s.clone()).collect(),
-            app_args: launcher.args.app.iter().map(|s| s.clone()).collect(),
+            classpath: classpath_hashed,
             aot_cache_hash,
         })
     }

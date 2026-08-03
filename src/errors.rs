@@ -52,8 +52,6 @@ pub enum Error {
         #[source]
         #[backtrace]
         cause: Box<Error>,
-        // #[backtrace]
-        // backtrace: Backtrace,
     },
     #[error("{msg}")]
     Generic {
@@ -84,7 +82,6 @@ impl Error {
 pub trait IntoErrorMsg {
     fn into_error_msg(self) -> String;
 }
-
 impl IntoErrorMsg for &'static str {
     fn into_error_msg(self) -> String {
         self.to_string()
@@ -95,7 +92,6 @@ impl IntoErrorMsg for String {
         self
     }
 }
-
 impl<F, S> IntoErrorMsg for F
 where
     F: FnOnce() -> S,
@@ -111,7 +107,6 @@ pub trait WithContext<E: Into<Error>> {
 
     fn err_ctx(self, msg: impl IntoErrorMsg) -> Self::Output;
 }
-
 impl<T, E: Into<Error>> WithContext<E> for Result<T, E> {
     type Output = Result<T, Error>;
 
@@ -125,7 +120,6 @@ pub trait MapErrGeneric<E> {
 
     fn map_err_generic<S: Into<String>>(self, f: impl FnOnce(E) -> S) -> Self::Output;
 }
-
 impl<T, E> MapErrGeneric<E> for Result<T, E> {
     type Output = Result<T, Error>;
 
@@ -137,7 +131,6 @@ impl<T, E> MapErrGeneric<E> for Result<T, E> {
 pub trait IntoError<T> {
     fn into_error(self) -> Result<T, Error>;
 }
-
 impl<T, E: Into<Error>> IntoError<T> for Result<T, E> {
     fn into_error(self) -> Result<T, Error> {
         self.map_err(|e| e.into())
