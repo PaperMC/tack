@@ -17,6 +17,7 @@
 
 use crate::errors::{Error, IntoError, WithContext};
 use crate::generic;
+use crate::util::is_env_true;
 use jni::objects::{JObject, JPrimitiveArray, TypeArray};
 use jni::strings::JNIStr;
 use jni::{AttachConfig, AttachGuard, Env, JValue, JavaVM, ScopeToken, jni_sig, jni_str};
@@ -160,6 +161,10 @@ pub fn java_bin(base: &Path) -> PathBuf {
 }
 
 pub fn check_java_version(java_home: &str) -> Result<(), Error> {
+    if is_env_true("NO_JAVA_VERSION_CHECK") {
+        return Ok(());
+    }
+
     let java_home = Path::new(java_home);
     let java = java_bin(java_home);
 
@@ -190,55 +195,21 @@ pub fn check_java_version(java_home: &str) -> Result<(), Error> {
     };
 
     let version = version.strip_suffix("-ea").unwrap_or(version);
-    let version_parts = version.split('.').take(3).collect::<Vec<&str>>();
-    let major_version = version_part(&version_parts, 0)?;
-    let minor_version = version_part(&version_parts, 1)?;
-    let patch_version = version_part(&version_parts, 2)?;
+    let major_version = version.split('.').take(1).next();
 
-    let version_err = "Unsupported Java version: Java 25.0.4 or higher is required, found: ";
+    match major_version {
+        Some(major_version) => {
+            let major_version = major_version
+                .parse::<u16>()
+                .err_ctx("Failed to parse 'java -version' (unrecognized version number)")?;
 
-    // We require >25.0.4
-    if major_version.is_none() || major_version.unwrap() < 25 {
-        let mut err_msg = format!(
-            "{}{}",
-            version_err,
-            major_version
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "unknown".to_string())
-        );
-        if let (Some(minor_version), Some(patch_version)) = (minor_version, patch_version) {
-            err_msg.push_str(&format!(".{}.{}", minor_version, patch_version));
+            if major_version <= 25 {
+                eprintln!("Unsupported Java version: Java 26 or higher is required, found: {major_version}");
+                Err(Error::Exit(1))
+            } else {
+                Ok(())
+            }
         }
-        eprintln!("{err_msg}");
-        return Err(Error::Exit(1));
+        None => Ok(()),
     }
-    let major_version = major_version.unwrap();
-    if major_version > 25 {
-        return Ok(());
-    }
-    if minor_version.is_none() || patch_version.is_none() {
-        // We can't verify it's 25.0.4, but we tried
-        return Ok(());
-    }
-    let minor_version = minor_version.unwrap();
-    let patch_version = patch_version.unwrap();
-    if minor_version > 0 || patch_version >= 4 {
-        return Ok(());
-    }
-
-    eprintln!("{}{}.{}.{}", version_err, major_version, minor_version, patch_version);
-    Err(Error::Exit(1))
-}
-
-fn version_part(parts: &[&str], index: usize) -> Result<Option<u16>, Error> {
-    if parts.len() <= index {
-        return Ok(None);
-    }
-    let num = parts[index].parse::<u16>().err_ctx(|| {
-        format!(
-            "Failed to parse 'java -version' (invalid version number): {}",
-            parts[index]
-        )
-    })?;
-    Ok(Some(num))
 }

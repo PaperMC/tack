@@ -31,7 +31,7 @@ pub fn copy_owned<S: Clone>(slice: &[S]) -> Vec<S> {
 }
 
 pub fn is_env_true(env: &str) -> bool {
-    std::env::var_os(env).is_some_and(|prop| prop.eq_ignore_ascii_case("true"))
+    std::env::var_os(env).is_some_and(|prop| prop == "1" || prop.eq_ignore_ascii_case("true"))
 }
 
 pub fn parse_hex(s: &str) -> Result<[u8; 32], Error> {
