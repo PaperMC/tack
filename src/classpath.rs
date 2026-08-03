@@ -17,12 +17,13 @@
 
 use crate::errors::{Error, IntoError, WithContext};
 use crate::generic;
-use crate::util::{
-    bytes_matches_hash, create_file, extract_zip_entry, file_matches_hash, find_zip_entry,
-    open_zip, parse_hex_named, read_zip_entry, read_zip_entry_text, require_zip_entry,
+use crate::launcher::LauncherBuilder;
+use crate::util::fs::{
+    bytes_matches_hash, create_file, extract_zip_entry, file_matches_hash, find_zip_entry, open_zip, read_zip_entry,
+    read_zip_entry_text, require_zip_entry,
 };
+use crate::util::{copy_owned, parse_hex_named};
 use qbsdiff::Bspatch;
-use std::ffi::OsString;
 use std::fmt::Debug;
 use std::fs::File;
 use std::io::Read;
@@ -31,38 +32,50 @@ use zip::ZipArchive;
 use zip::result::ZipError;
 
 pub fn repo_dir() -> PathBuf {
-    let repo_dir = std::env::var_os("TACK_BUNDLER_REPO_DIR")
-        .or(std::env::var_os("PAPERCLIP_BUNDLER_REPO_DIR"));
+    let repo_dir = std::env::var_os("TACK_BUNDLER_REPO_DIR").or(std::env::var_os("PAPERCLIP_BUNDLER_REPO_DIR"));
     let repo_dir = repo_dir.as_ref().map(Path::new);
     repo_dir.unwrap_or_else(|| Path::new("")).to_owned()
 }
 
-pub fn setup_classpath(dir: &Path, jar_file: &Path) -> Result<(Vec<OsString>, TackMeta), Error> {
-    let mut paperclip_jar = open_zip(jar_file)?;
+struct ClasspathCtx<'a> {
+    paperclip_jar: ZipArchive<File>,
+    original_jar: Option<ZipArchive<File>>,
+    base_file: Option<PathBuf>,
+    meta: TackMeta,
+    dir: &'a Path,
+}
+
+pub fn setup_classpath(launcher: &LauncherBuilder) -> Result<(Vec<PathBuf>, TackMeta), Error> {
+    let mut paperclip_jar = open_zip(&launcher.jar)?;
     let meta = extract_metadata(&mut paperclip_jar)?;
 
-    if !meta.patches.is_empty() && meta.download_context.is_none() {
-        return generic!(
-            "Patches found without a corresponding original-url in {}",
-            jar_file.display()
-        );
+    let mut ctx = ClasspathCtx {
+        paperclip_jar,
+        original_jar: None,
+        base_file: None,
+        meta,
+        dir: &launcher.repo_dir,
+    };
+
+    if !ctx.meta.patches.is_empty() && ctx.meta.download_context.is_none() {
+        let jar = launcher.jar.display();
+        return generic!("Patches found without a corresponding original-url in {jar}");
     }
 
-    let base_file = if let Some(download_context) = &meta.download_context {
-        Some(
-            download_context
-                .download(dir)
-                .err_ctx(|| format!("Failed to download file: {}", download_context.file_name))?,
-        )
+    ctx.base_file = if let Some(download_context) = &ctx.meta.download_context {
+        let file = download_context
+            .download(&launcher.repo_dir)
+            .err_ctx(|| format!("Failed to download file: {}", download_context.file_name))?;
+        Some(file)
     } else {
         None
     };
 
-    let mut classpath = extract_and_apply_patches(dir, &mut paperclip_jar, base_file, &meta)?;
+    let mut classpath = extract_and_apply_patches(&mut ctx)?;
     let mut res = Vec::with_capacity(classpath.versions.len() + classpath.libraries.len());
     res.append(&mut classpath.versions);
     res.append(&mut classpath.libraries);
-    Ok((res, meta))
+    Ok((res, ctx.meta))
 }
 
 pub struct TackMeta {
@@ -127,109 +140,64 @@ pub fn extract_metadata(jar: &mut ZipArchive<File>) -> Result<TackMeta, Error> {
     })
 }
 
-fn extract_and_apply_patches<P: AsRef<Path> + Debug>(
-    dir: &Path,
-    paperclip_jar: &mut ZipArchive<File>,
-    original_jar_file: Option<P>,
-    meta: &TackMeta,
-) -> Result<Classpath, Error> {
-    let mut original_jar = try {
-        original_jar_file
+fn extract_and_apply_patches(ctx: &mut ClasspathCtx) -> Result<Classpath, Error> {
+    ctx.original_jar = try {
+        ctx.base_file
             .as_ref()
             .map(|j| ZipArchive::new(File::open(j)?))
             .transpose()?
     }
-    .err_ctx(|| format!("Failed to open jar: {:?}", original_jar_file))?;
+    .err_ctx(|| format!("Failed to open jar: {:?}", &ctx.base_file))?;
 
     let mut classpath = Classpath {
         versions: vec![],
         libraries: vec![],
     };
-    extract_files(
-        meta,
-        Location::Versions,
-        dir,
-        paperclip_jar,
-        &mut original_jar,
-        &meta.versions,
-        &mut classpath,
-    )
-    .err_ctx("Failed to extract versions")?;
 
-    extract_files(
-        meta,
-        Location::Libraries,
-        dir,
-        paperclip_jar,
-        &mut original_jar,
-        &meta.libraries,
-        &mut classpath,
-    )
-    .err_ctx("Failed to extract libraries")?;
+    extract_files(ctx, Location::Versions, &mut classpath).err_ctx("Failed to extract versions")?;
+    extract_files(ctx, Location::Libraries, &mut classpath).err_ctx("Failed to extract libraries")?;
 
-    apply_patches(meta, dir, paperclip_jar, &mut original_jar, &mut classpath)
-        .err_ctx("Failed to apply patches")?;
+    apply_patches(ctx, &mut classpath).err_ctx("Failed to apply patches")?;
 
     Ok(classpath)
 }
 
-fn extract_files(
-    meta: &TackMeta,
-    location: Location,
-    dir: &Path,
-    paperclip_jar: &mut ZipArchive<File>,
-    original_jar: &mut Option<ZipArchive<File>>,
-    entries: &[FileEntry],
-    classpath: &mut Classpath,
-) -> Result<(), Error> {
+fn extract_files(ctx: &mut ClasspathCtx, location: Location, classpath: &mut Classpath) -> Result<(), Error> {
+    let entries = match location {
+        Location::Versions => copy_owned(&ctx.meta.versions),
+        Location::Libraries => copy_owned(&ctx.meta.libraries),
+    };
     if entries.is_empty() {
         return Ok(());
     }
 
-    let jar_path = format!("META-INF/{}", location.name());
-    let target_path = dir.join(location.name());
+    let target_path = ctx.dir.join(location.name());
     for entry in entries {
         entry
-            .extract(FileEntryArgs {
-                meta,
-                location,
-                target_base_path: &target_path,
-                paperclip_jar,
-                original_jar,
-                jar_base_path: &jar_path,
-                classpath,
-            })
+            .extract(ctx, classpath, location, &target_path)
             .err_ctx(|| format!("Failed to extract file: {}", entry.path))?;
     }
 
     Ok(())
 }
 
-fn apply_patches(
-    meta: &TackMeta,
-    dir: &Path,
-    paperclip_jar: &mut ZipArchive<File>,
-    original_jar: &mut Option<ZipArchive<File>>,
-    classpath: &mut Classpath,
-) -> Result<(), Error> {
-    if meta.patches.is_empty() {
+fn apply_patches(ctx: &mut ClasspathCtx, classpath: &mut Classpath) -> Result<(), Error> {
+    if ctx.meta.patches.is_empty() {
         return Ok(());
     }
-    if original_jar.is_none() {
-        return generic!("Patches provided without patch target");
-    }
-    let original_jar = original_jar.as_mut().unwrap();
+    match &ctx.original_jar {
+        Some(j) => j,
+        None => return generic!("Patches provided without patch target"),
+    };
 
     let mut announced = false;
-    for patch_entry in &meta.patches {
-        announced |= patch_entry
-            .apply_patch(dir, paperclip_jar, original_jar, announced, classpath)
-            .err_ctx(|| {
-                format!(
-                    "Failed to apply patch: {}/{}",
-                    patch_entry.location, patch_entry.patch_path
-                )
-            })?;
+    for patch_entry in copy_owned(&ctx.meta.patches) {
+        announced |= patch_entry.apply_patch(ctx, classpath, announced).err_ctx(|| {
+            format!(
+                "Failed to apply patch: {}/{}",
+                patch_entry.location, patch_entry.patch_path
+            )
+        })?;
     }
 
     Ok(())
@@ -250,77 +218,75 @@ impl Location {
         }
     }
 
-    fn name(&self) -> &'static str {
+    fn name(self) -> &'static str {
         match self {
             Self::Versions => "versions",
             Self::Libraries => "libraries",
         }
     }
+
+    fn jar_path(self) -> &'static str {
+        match self {
+            Self::Versions => "META-INF/versions",
+            Self::Libraries => "META-INF/libraries",
+        }
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FileEntry {
     pub hash: [u8; 32],
     pub id: String,
     pub path: String,
 }
 
-struct FileEntryArgs<'a> {
-    meta: &'a TackMeta,
-    location: Location,
-    target_base_path: &'a Path,
-    paperclip_jar: &'a mut ZipArchive<File>,
-    original_jar: &'a mut Option<ZipArchive<File>>,
-    jar_base_path: &'a str,
-    classpath: &'a mut Classpath,
-}
-
 impl FileEntry {
-    fn extract(&self, args: FileEntryArgs) -> Result<(), Error> {
-        for patch in &args.meta.patches {
-            if patch.location == args.location.name() && patch.output_path == self.path {
+    fn extract(
+        &self,
+        ctx: &mut ClasspathCtx,
+        classpath: &mut Classpath,
+        location: Location,
+        target_base_path: &Path,
+    ) -> Result<(), Error> {
+        for patch in &ctx.meta.patches {
+            if patch.location == location.name() && patch.output_path == self.path {
                 // This file will be created from a patch
                 return Ok(());
             }
         }
 
-        let output_path = args.target_base_path.join(&self.path);
+        let output_path = target_base_path.join(&self.path);
         if output_path.exists() && file_matches_hash(&output_path, &self.hash)? {
-            args.classpath
-                .push(args.location, output_path.into_os_string());
+            classpath.push(location, output_path);
             return Ok(());
         }
 
         // The file may either be in the paperclip jar, or the original jar
-        let entry_path = format!("{}/{}", args.jar_base_path, self.path);
+        let entry_path = format!("{}/{}", location.jar_path(), self.path);
 
-        if let Some(mut entry) = find_zip_entry(args.paperclip_jar, &entry_path)? {
+        if let Some(mut entry) = find_zip_entry(&mut ctx.paperclip_jar, &entry_path)? {
             extract_zip_entry(&mut entry, &entry_path, &output_path).err_ctx(|| {
                 format!(
                     "Failed to extract file from paperclip jar: {}/{}",
-                    args.jar_base_path, self.path
+                    location.jar_path(),
+                    self.path
                 )
             })?;
         } else {
-            if let Some(original_jar) = args.original_jar {
+            if let Some(original_jar) = &mut ctx.original_jar {
                 if let Some(mut entry) = find_zip_entry(original_jar, &entry_path)? {
                     extract_zip_entry(&mut entry, &entry_path, &output_path).err_ctx(|| {
                         format!(
                             "Failed to extract file from original jar: {}/{}",
-                            args.jar_base_path, self.path
+                            location.jar_path(),
+                            self.path
                         )
                     })?;
                 } else {
-                    return generic!(
-                        "{} not found in either paperclip jar or original jar",
-                        self.path
-                    );
+                    return generic!("{} not found in either paperclip jar or original jar", self.path);
                 }
             } else {
-                return generic!(
-                    "{} not found in paperclip jar, and no original jar provided",
-                    self.path
-                );
+                return generic!("{} not found in paperclip jar, and no original jar provided", self.path);
             }
         }
 
@@ -328,8 +294,7 @@ impl FileEntry {
             return generic!("Hash check failed for extracted file {}", self.path);
         }
 
-        args.classpath
-            .push(args.location, output_path.into_os_string());
+        classpath.push(location, output_path);
         Ok(())
     }
 
@@ -356,7 +321,7 @@ impl FileEntry {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PatchEntry {
     pub location: String,
     pub original_hash: [u8; 32],
@@ -368,21 +333,14 @@ pub struct PatchEntry {
 }
 
 impl PatchEntry {
-    fn apply_patch(
-        &self,
-        repo_dir: &Path,
-        paperclip_jar: &mut ZipArchive<File>,
-        original_jar: &mut ZipArchive<File>,
-        announced: bool,
-        classpath: &mut Classpath,
-    ) -> Result<bool, Error> {
+    fn apply_patch(&self, ctx: &mut ClasspathCtx, classpath: &mut Classpath, announced: bool) -> Result<bool, Error> {
         let location = Location::from_name(&self.location);
         let jar_path = format!("META-INF/{}/{}", self.location, self.original_path);
-        let output_file = repo_dir.join(&self.location).join(&self.output_path);
+        let output_file = ctx.dir.join(&self.location).join(&self.output_path);
 
         // Short-cut if the patch is already applied
         if output_file.exists() && file_matches_hash(&output_file, &self.output_hash)? {
-            classpath.push(location, output_file.into_os_string());
+            classpath.push(location, output_file);
             return Ok(false);
         }
 
@@ -390,12 +348,13 @@ impl PatchEntry {
             println!("Applying patches");
         }
 
-        let mut jar_entry = match original_jar.by_name(jar_path.as_str()) {
-            Ok(entry) => entry,
-            Err(ZipError::FileNotFound) => {
+        let mut jar_entry = match ctx.original_jar.as_mut().map(|j| j.by_name(jar_path.as_str())) {
+            Some(Ok(entry)) => entry,
+            Some(Err(ZipError::FileNotFound)) => {
                 return generic!("Input file not found in original jar {jar_path}");
             }
-            Err(e) => return Err(Error::from(e)),
+            Some(Err(e)) => return Err(Error::from(e)),
+            None => unreachable!(),
         };
 
         let mut input_file_data = Vec::<u8>::new();
@@ -407,7 +366,7 @@ impl PatchEntry {
 
         // Get and verify patch data is correct
         let patch_jar_path = format!("META-INF/{}/{}", self.location, self.patch_path);
-        let mut patch_entry = match find_zip_entry(paperclip_jar, &patch_jar_path)? {
+        let mut patch_entry = match find_zip_entry(&mut ctx.paperclip_jar, &patch_jar_path)? {
             Some(entry) => entry,
             None => {
                 return generic!("Patch file not found in paperclip jar: {}", &patch_jar_path);
@@ -427,9 +386,7 @@ impl PatchEntry {
             let mut target_file = create_file(&output_file)?;
 
             let patcher = Bspatch::new(&patch_data).into_error()?;
-            patcher
-                .apply(&input_file_data, &mut target_file)
-                .into_error()?;
+            patcher.apply(&input_file_data, &mut target_file).into_error()?;
         }
         .err_ctx("Error executing bsdiff patch")?;
 
@@ -437,7 +394,7 @@ impl PatchEntry {
             return generic!("Patch not applied correctly for {}", self.output_path);
         }
 
-        classpath.push(location, output_file.into_os_string());
+        classpath.push(location, output_file);
         Ok(true)
     }
 
@@ -517,10 +474,7 @@ impl DownloadContext {
         .err_ctx(|| format!("Failed to download: {}", self.file_name))?;
 
         if !file_matches_hash(&target_file, &self.hash)? {
-            return generic!(
-                "Hash check failed for downloaded file {}",
-                target_file.display()
-            );
+            return generic!("Hash check failed for downloaded file {}", target_file.display());
         }
 
         Ok(target_file)
@@ -555,16 +509,16 @@ impl DownloadContext {
 
 #[derive(Debug)]
 struct Classpath {
-    versions: Vec<OsString>,
-    libraries: Vec<OsString>,
+    versions: Vec<PathBuf>,
+    libraries: Vec<PathBuf>,
 }
 
 impl Classpath {
-    fn push(&mut self, location: Location, file_name: OsString) {
+    fn push(&mut self, location: Location, file: PathBuf) {
         match location {
             Location::Versions => &mut self.versions,
             Location::Libraries => &mut self.libraries,
         }
-        .push(file_name);
+        .push(file);
     }
 }

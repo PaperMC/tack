@@ -14,6 +14,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
+
 use std::backtrace::Backtrace;
 use thiserror::Error;
 
@@ -28,10 +29,7 @@ pub enum Error {
     #[error("JVM start error: {0:?}")]
     StartJvm(#[from] jni::errors::StartJvmError, #[backtrace] Backtrace),
     #[error("Failed to find Java installation: {0:?}")]
-    JavaLoc(
-        #[from] java_locator::errors::JavaLocatorError,
-        #[backtrace] Backtrace,
-    ),
+    JavaLoc(#[from] java_locator::errors::JavaLocatorError, #[backtrace] Backtrace),
     #[error("IO error: {0:?}")]
     Io(#[from] std::io::Error, #[backtrace] Backtrace),
     #[error("Time error: {0:?}")]

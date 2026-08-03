@@ -43,6 +43,12 @@ pub enum RecordMode {
     NoAot,
 }
 
+impl RecordMode {
+    pub fn is_record(self) -> bool {
+        self == RecordMode::OnlyRecord || self == RecordMode::ForceRecord
+    }
+}
+
 // Split args into (jvm_args, app_args)
 // This function handles --version, --help, and other cases
 pub fn split_args(args: Vec<String>) -> Result<Option<ArgOptions>, Error> {
@@ -91,8 +97,7 @@ pub fn split_args(args: Vec<String>) -> Result<Option<ArgOptions>, Error> {
                 }
                 app_args.push(arg);
             }
-            "--check-aot" | "--only-use-aot" | "--no-record" | "--only-record"
-            | "--force-record" | "--no-aot" => {
+            "--check-aot" | "--only-use-aot" | "--no-record" | "--only-record" | "--force-record" | "--no-aot" => {
                 if jvm_args.is_empty() && app_args.is_empty() && jar.is_none() {
                     if record_preference != RecordMode::Normal {
                         eprintln!(
@@ -167,6 +172,8 @@ pub fn split_args(args: Vec<String>) -> Result<Option<ArgOptions>, Error> {
     }))
 }
 
+// Parses args file following specification defined at
+// https://docs.oracle.com/en/java/javase/25/docs/specs/man/java.html#java-command-line-argument-files
 fn args_file(arg: &str, target: &mut Vec<String>) -> Result<(), Error> {
     if !arg.starts_with('@') {
         return Ok(());
@@ -242,8 +249,7 @@ impl<R: BufRead> CharStream<R> {
         self.reader.read_exact(&mut buf[1..])?;
         self.bytes_read += (len - 1) as u64;
 
-        let s = std::str::from_utf8(&buf)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let s = std::str::from_utf8(&buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         Ok(s.chars().next())
     }
@@ -266,10 +272,7 @@ impl<R: BufRead> CharStream<R> {
     }
 }
 
-fn parse_args_file_stream<R: BufRead>(
-    mut stream: CharStream<R>,
-    target: &mut Vec<String>,
-) -> Result<(), Error> {
+fn parse_args_file_stream<R: BufRead>(mut stream: CharStream<R>, target: &mut Vec<String>) -> Result<(), Error> {
     let mut current_arg = String::new();
     let mut in_token = false;
     let mut quote_char: Option<char> = None;
@@ -522,10 +525,7 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    fn create_temp_arg_file(
-        prefix: &str,
-        content: &str,
-    ) -> (std::path::PathBuf, tempfile_cleanup::Cleanup) {
+    fn create_temp_arg_file(prefix: &str, content: &str) -> (std::path::PathBuf, tempfile_cleanup::Cleanup) {
         let mut path = std::env::temp_dir();
         let filename = format!(
             "tack_test_args_{}_{}_{}.txt",
@@ -599,10 +599,7 @@ mod tests {
         let arg_str = format!("@{}", path.to_str().unwrap());
         let mut target = Vec::new();
         args_file(&arg_str, &mut target).unwrap();
-        assert_eq!(
-            target,
-            vec!["-cp", "/lib/cool app/jars:/lib/another app/jars"]
-        );
+        assert_eq!(target, vec!["-cp", "/lib/cool app/jars:/lib/another app/jars"]);
     }
 
     #[test]
@@ -622,10 +619,7 @@ mod tests {
         let arg_str = format!("@{}", path.to_str().unwrap());
         let mut target = Vec::new();
         args_file(&arg_str, &mut target).unwrap();
-        assert_eq!(
-            target,
-            vec!["-Xmx1g", "--disable-@files", "-Xmx2g", "@another.txt"]
-        );
+        assert_eq!(target, vec!["-Xmx1g", "--disable-@files", "-Xmx2g", "@another.txt"]);
     }
 
     #[test]

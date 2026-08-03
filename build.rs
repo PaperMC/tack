@@ -1,6 +1,23 @@
+/*
+ * tack - Paper server launcher with AOT cache management.
+ * Copyright (C) 2026  Kyle Wood (DenWav)
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3 of the License only.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+use chrono::{DateTime, SubsecRound, Utc};
 use std::path::Path;
 use std::process::Command;
-use chrono::{DateTime, SubsecRound, Utc};
 
 fn main() {
     println!("cargo::rerun-if-env-changed=CI_BUILD_DATE");
@@ -25,7 +42,9 @@ fn main() {
         .unwrap_or(Utc::now());
     let timestamp = timestamp.trunc_subsecs(0).format("%+").to_string();
 
-    let version_text = format!("pub mod config {{ pub const VERSION: &str = \"{base_version} (commit: {rev}) (build: {timestamp})\"; }}\n");
+    let version_text = format!(
+        "pub mod config {{ pub const VERSION: &str = \"{base_version} (commit: {rev}) (build: {timestamp})\"; }}\n"
+    );
     std::fs::write(path, &version_text).unwrap();
 }
 
