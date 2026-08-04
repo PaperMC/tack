@@ -9,15 +9,16 @@ strip = false
 opt-level = 3
 lto = true
 codegen-units = 1
-debug = "full"
+debug = "line-tables-only"
+
+[features]
+rustls = ["curl/rustls", "dep:openssl-probe"]
 
 [dependencies]
 jni = { version = "0.22.4", features = ["invocation"] }
 java-locator = "0.1.9"
 qbsdiff = "1.4.4"
 
-nyquest = { version = "0.4.0", features = ["blocking-stream"] }
-nyquest-preset = { version = "0.4.0", features = ["blocking-stream"] }
 sha2 = "0.11.0"
 digest-io = "0.1.0"
 thiserror = "2.0.19"
@@ -30,8 +31,13 @@ postcard = "1.1.3"
 
 indoc = "2.0.7"
 
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+nyquest = { version = "0.4.0", features = ["blocking-stream"] }
+nyquest-preset = { version = "0.4.0", features = ["blocking-stream"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
-nyquest-backend-curl = { version = "0.4.1", features = ["blocking-stream", "ssl"] }
+curl = "0.4.50"
+openssl-probe = { version = "0.2.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10.1"

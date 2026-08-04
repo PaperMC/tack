@@ -53,14 +53,10 @@ fn configure_host() {}
 
 #[cfg(target_os = "linux")]
 fn configure_host() {
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS not set");
-
-    if target_os == "linux" {
-        pkg_config::Config::new()
-            .probe("libcurl")
-            .expect("System libcurl development headers are required for Linux builds.");
-        pkg_config::Config::new()
-            .probe("openssl")
-            .expect("System openssl development headers are required for Linux builds.");
-    }
+    pkg_config::Config::new()
+        .probe("libcurl")
+        .expect("System libcurl development headers are required for Linux builds.");
+    pkg_config::Config::new()
+        .probe("openssl")
+        .expect("System openssl development headers are required for Linux builds.");
 }

@@ -24,28 +24,45 @@ pub const ONLY_USE_AOT_FAILED_EXIT_CODE: u8 = 33;
 pub enum Error {
     #[error("JNI error: {0:?}")]
     Jni(#[from] jni::errors::Error, #[backtrace] Backtrace),
+
     #[error("JVM error: {0:?}")]
     JVM(#[from] jni::JvmError, #[backtrace] Backtrace),
+
     #[error("JVM start error: {0:?}")]
     StartJvm(#[from] jni::errors::StartJvmError, #[backtrace] Backtrace),
+
     #[error("Failed to find Java installation: {0:?}")]
     JavaLoc(#[from] java_locator::errors::JavaLocatorError, #[backtrace] Backtrace),
+
     #[error("IO error: {0:?}")]
     Io(#[from] std::io::Error, #[backtrace] Backtrace),
+
     #[error("Time error: {0:?}")]
     Time(#[from] std::time::SystemTimeError, #[backtrace] Backtrace),
+
+    #[cfg(not(target_os = "linux"))]
     #[error("Download error: {0:?}")]
     Net(#[from] nyquest::Error, #[backtrace] Backtrace),
+
+    #[cfg(target_os = "linux")]
+    #[error("Download error: {0:?}")]
+    Net(#[from] curl::Error, #[backtrace] Backtrace),
+
     #[error("Zip error: {0:?}")]
     Zip(#[from] zip::result::ZipError, #[backtrace] Backtrace),
+
     #[error("UTF-8 error: {0:?}")]
     Utf(#[from] std::string::FromUtf8Error, #[backtrace] Backtrace),
+
     #[error("Hex error: {0:?}")]
     Hex(#[from] hex::FromHexError, #[backtrace] Backtrace),
+
     #[error("Parse error: {0:?}")]
     Int(#[from] std::num::ParseIntError, #[backtrace] Backtrace),
+
     #[error("Serialization error: {0:?}")]
     Postcard(#[from] postcard::Error, #[backtrace] Backtrace),
+
     #[error("{msg}\nCaused by: {cause}")]
     Wrapped {
         msg: String,
@@ -53,12 +70,14 @@ pub enum Error {
         #[backtrace]
         cause: Box<Error>,
     },
+
     #[error("{msg}")]
     Generic {
         msg: String,
         #[backtrace]
         backtrace: Backtrace,
     },
+
     #[error("Exiting with code {0}")]
     Exit(u8),
 }

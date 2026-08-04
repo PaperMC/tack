@@ -468,8 +468,8 @@ impl DownloadContext {
 
         let mut output_file = create_file(&target_file)?;
         try {
-            let mut downloader = nyquest::blocking::get(self.url.to_string())?.into_read();
-            std::io::copy(&mut downloader, &mut output_file).map_err(Into::into)?
+            let mut downloader = self.get_downloader(&self.url)?;
+            std::io::copy(downloader.as_mut(), &mut output_file).map_err(Into::into)?
         }
         .err_ctx(|| format!("Failed to download: {}", self.file_name))?;
 
@@ -504,6 +504,48 @@ impl DownloadContext {
             url: url.to_string(),
             file_name: file_name.to_string(),
         })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn get_downloader(&self, url: &str) -> Result<Box<dyn Read>, Error> {
+        let read = nyquest::blocking::get(url.to_string())?.into_read();
+        Ok(Box::new(read))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn get_downloader(&self, url: &str) -> Result<Box<dyn Read>, Error> {
+        use std::collections::VecDeque;
+
+        struct Collector(VecDeque<u8>);
+
+        impl curl::easy::Handler for &mut Collector {
+            fn write(&mut self, data: &[u8]) -> Result<usize, curl::easy::WriteError> {
+                self.0.extend(data);
+                Ok(data.len())
+            }
+        }
+        impl Read for Collector {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.0.read(buf)
+            }
+        }
+
+        let mut collector = Collector(VecDeque::new());
+        let mut easy = curl::easy::Easy2::new(&mut collector);
+        #[cfg(feature = "rustls")]
+        if let Some(cert) = openssl_probe::probe().cert_file {
+            easy.cainfo(&cert)?;
+        }
+        easy.url(url)?;
+        easy.get(true)?;
+        easy.perform()?;
+        let response = easy.response_code()?;
+        if response < 200 || response >= 300 {
+            return generic!("Failed to download (response code: {response}): {url}");
+        }
+        drop(easy);
+
+        Ok(Box::new(collector))
     }
 }
 
