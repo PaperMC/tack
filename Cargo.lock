@@ -1374,7 +1374,7 @@ dependencies = [
 
 [[package]]
 name = "tack"
-version = "0.1.0"
+version = "0.1.0-beta"
 dependencies = [
  "chrono",
  "core-foundation",

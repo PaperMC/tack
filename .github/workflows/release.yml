@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Wait for Build workflow
+        id: get_build_run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "Finding 'Build' run for commit ${{ github.sha }}..."
+          RUN_ID=$(gh run list --workflow="build.yml" --commit="${{ github.sha }}" --json databaseId --jq '.[0].databaseId')
+
+          if [ -z "$RUN_ID" ]; then
+            echo "Error: No 'Build' run found for commit ${{ github.sha }}"
+            exit 1
+          fi
+
+          echo "Waiting for Build run #$RUN_ID to complete..."
+          gh run watch "$RUN_ID" --exit-status --compact -i 15
+
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v8
+        with:
+          run-id: ${{ steps.get_build_run.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: artifacts
+
+      - name: Package Release Assets
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p release_assets
+
+          for dir in artifacts/*/; do
+            dir="${dir%/}"
+            artifact_name="$(basename "$dir")"
+            asset_name="${artifact_name/tack-/tack-${VERSION}-}"
+
+            if [[ "$artifact_name" == *appimage* ]]; then
+              # Uncompressed standalone AppImage
+              clean_name="${asset_name%-appimage}"
+              cp "$dir"/*.AppImage "release_assets/${clean_name}.AppImage"
+            elif [[ "$artifact_name" == *windows* ]]; then
+              # Compressed Windows zip
+              (cd "$dir" && zip -r "../../release_assets/${asset_name}.zip" .)
+            else
+              # Compressed Linux / macOS tar.gz
+              tar -czf "release_assets/${asset_name}.tar.gz" -C "$dir" .
+            fi
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          body_path: changelog.md
+          files: release_assets/*
