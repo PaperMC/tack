@@ -147,7 +147,7 @@ fn extract_and_apply_patches(ctx: &mut ClasspathCtx) -> Result<Classpath, Error>
             .map(|j| ZipArchive::new(File::open(j)?))
             .transpose()?
     }
-    .err_ctx(|| format!("Failed to open jar: {:?}", &ctx.base_file))?;
+    .err_ctx(|| format!("Failed to open jar: {:?}", ctx.base_file))?;
 
     let mut classpath = Classpath {
         versions: vec![],

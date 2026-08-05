@@ -95,11 +95,11 @@ pub fn create_file(path: &Path) -> Result<File, Error> {
 }
 
 pub fn try_delete_file(path: &Path) {
-    if path.exists() {
-        if let Err(e) = std::fs::remove_file(&path) {
-            let file_name = path.file_name().map(|p| p.to_string_lossy()).unwrap_or_default();
-            eprintln!("Failed to delete existing {} file: {}", file_name, e);
-        }
+    if path.exists()
+        && let Err(e) = std::fs::remove_file(path)
+    {
+        let file_name = path.file_name().map(|p| p.to_string_lossy()).unwrap_or_default();
+        eprintln!("Failed to delete existing {} file: {}", file_name, e);
     }
 }
 

@@ -157,7 +157,7 @@ impl Launcher {
                 let server_thread = self.start_jvm_thread(scope, &jvm).join_res();
 
                 let meta_thread_res = match self.action {
-                    AotCacheAction::Record => AotRecorder::new(&self, &jvm)
+                    AotCacheAction::Record => AotRecorder::new(self, &jvm)
                         .start_record_thread(scope)
                         .map(|h| h.join_res()),
                     _ => None,

@@ -15,6 +15,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+use jni::errors::StartJvmError;
 use std::backtrace::Backtrace;
 use thiserror::Error;
 
@@ -23,13 +24,13 @@ pub const ONLY_USE_AOT_FAILED_EXIT_CODE: u8 = 33;
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("JNI error: {0:?}")]
-    Jni(#[from] jni::errors::Error, #[backtrace] Backtrace),
+    Jni(#[from] Box<jni::errors::Error>, #[backtrace] Backtrace),
 
     #[error("JVM error: {0:?}")]
     JVM(#[from] jni::JvmError, #[backtrace] Backtrace),
 
     #[error("JVM start error: {0:?}")]
-    StartJvm(#[from] jni::errors::StartJvmError, #[backtrace] Backtrace),
+    StartJvm(#[from] Box<jni::errors::StartJvmError>, #[backtrace] Backtrace),
 
     #[error("Failed to find Java installation: {0:?}")]
     JavaLoc(#[from] java_locator::errors::JavaLocatorError, #[backtrace] Backtrace),
@@ -95,6 +96,18 @@ impl Error {
             msg: msg.into(),
             cause: Box::new(err.into()),
         }
+    }
+}
+
+impl From<jni::errors::Error> for Error {
+    fn from(value: jni::errors::Error) -> Self {
+        Error::Jni(Box::new(value), Backtrace::capture())
+    }
+}
+
+impl From<jni::errors::StartJvmError> for Error {
+    fn from(value: StartJvmError) -> Self {
+        Error::StartJvm(Box::new(value), Backtrace::capture())
     }
 }
 

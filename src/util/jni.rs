@@ -108,7 +108,7 @@ impl JavaLog for JavaVM {
                         &logger,
                         method,
                         jni_sig!("(Ljava/lang/String;)V"),
-                        &[JValue::Object(&bar)],
+                        &[JValue::Object(bar)],
                     )?;
                 }
 
@@ -125,14 +125,14 @@ impl JavaLog for JavaVM {
                         &logger,
                         method,
                         jni_sig!("(Ljava/lang/String;)V"),
-                        &[JValue::Object(&bar)],
+                        &[JValue::Object(bar)],
                     )?;
                 }
 
                 Ok(())
             },
         );
-        if let Err(_) = res {
+        if res.is_err() {
             // We failed to log the message, so just print it
             match kind {
                 LogKind::Info => println!("{msg}"),

@@ -108,7 +108,7 @@ impl<'a> AotRecorder<'a> {
             // for us to release the last non-daemon thread.
 
             let mut scope = ScopeToken::default();
-            let mut guard = jni_attach_thread(&self.jvm, &mut scope, jni_str!("aot-cache-checker"))?;
+            let mut guard = jni_attach_thread(self.jvm, &mut scope, jni_str!("aot-cache-checker"))?;
             let env = guard.borrow_env_mut();
 
             // While we are waiting, we need to make sure the `main` and `Server thread` threads are still running.
@@ -146,7 +146,7 @@ impl<'a> AotRecorder<'a> {
                 return generic!("No AOT cache file found after recording!");
             }
 
-            let meta = AotMeta::build(&self.launcher).err_ctx("Failed to generate AOT cache meta")?;
+            let meta = AotMeta::build(self.launcher).err_ctx("Failed to generate AOT cache meta")?;
 
             let aot_meta_file = AotMeta::aot_meta_file(&self.launcher.repo_dir);
             meta.write(&aot_meta_file).err_ctx("Failed to write AOT cache meta")?;
@@ -160,7 +160,7 @@ impl<'a> AotRecorder<'a> {
 
     pub fn end_aot_recording(&self) -> Result<bool, Error> {
         let mut scope = ScopeToken::default();
-        let mut guard = jni_attach_thread(&self.jvm, &mut scope, jni_str!("aot-cache-checker"))?;
+        let mut guard = jni_attach_thread(self.jvm, &mut scope, jni_str!("aot-cache-checker"))?;
         let env = guard.borrow_env_mut();
 
         self.jvm
@@ -226,14 +226,14 @@ impl<'a> AotRecorder<'a> {
         }
 
         let mut cmd = Command::new(current_exe);
-        cmd.args(&[
+        cmd.args([
             "--no-aot",
             "-Xlog:aot*=off",
             "-Xlog:aot*=info:file=.paper/logs/aot-create.log",
             "-XX:AOTMode=create",
         ]);
         if self.launcher.compat {
-            cmd.args(&["-XX:+UnlockDiagnosticVMOptions", "-XX:-AOTInvokeDynamicLinking"]);
+            cmd.args(["-XX:+UnlockDiagnosticVMOptions", "-XX:-AOTInvokeDynamicLinking"]);
         }
 
         let jvm_args = &self.launcher.args.jvm;
@@ -241,7 +241,7 @@ impl<'a> AotRecorder<'a> {
             cmd.arg(arg);
         });
 
-        cmd.args(&[
+        cmd.args([
             format!("-XX:AOTConfiguration={aot_conf_file}").as_str(),
             format!("-XX:AOTCache={aot_cache_file}").as_str(),
         ]);
@@ -249,7 +249,7 @@ impl<'a> AotRecorder<'a> {
         let jar = self.launcher.jar.to_str();
         let jar = jar.ok_or_else(|| Error::generic("Failed to convert jar path to String"))?;
 
-        cmd.args(&["-jar", jar]);
+        cmd.args(["-jar", jar]);
 
         let (mut reader, writer) = os_pipe::pipe()?;
         cmd.stdout(writer.try_clone()?);
@@ -269,7 +269,7 @@ impl<'a> AotRecorder<'a> {
                 msg.push_str("\nYou can try using '--aot-compat'.");
             }
             if !combined_output.is_empty() {
-                msg.push_str("\n");
+                msg.push('\n');
                 msg.push_str(combined_output.trim());
             }
             self.jvm.log(LogKind::Error, &msg);

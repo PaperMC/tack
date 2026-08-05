@@ -66,7 +66,7 @@ impl AotMeta {
 
         Ok(AotMeta {
             jvm_ident,
-            jvm_args: launcher.args.jvm.iter().map(|s| s.clone()).collect(),
+            jvm_args: launcher.args.jvm.to_vec(),
             classpath: classpath_hashed,
             aot_cache_hash,
         })
