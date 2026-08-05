@@ -69,9 +69,7 @@ benefit from that AOT cache file.
 >    * The server jar
 >    * All library jars
 >    * The SHA-256 hash of all classpath jars
->    * The last modified timestamp of all classpath jars
 >  * The complete JVM argument list (order matters)
->  * The complete application argument list (order matters)
 >  * The SHA-256 hash of the AOT cache file itself
 > If any of these values don't match, the AOT cache will be marked invalid and will need to be re-recorded.
 
