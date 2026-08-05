@@ -34,6 +34,9 @@ use std::error::request_ref;
 include!(concat!(env!("OUT_DIR"), "/config.rs"));
 
 fn main() {
+    #[cfg(windows)]
+    util::windows::check_gui_launch();
+
     configure_networking();
 
     match run() {
@@ -43,10 +46,10 @@ fn main() {
             eprintln!("{e}");
 
             // If backtraces are enabled, print it
-            if let Some(backtrace) = request_ref::<Backtrace>(&e) {
-                if backtrace.status() == BacktraceStatus::Captured {
-                    eprintln!("{}", backtrace);
-                }
+            if let Some(backtrace) = request_ref::<Backtrace>(&e)
+                && backtrace.status() == BacktraceStatus::Captured
+            {
+                eprintln!("{}", backtrace);
             };
 
             std::process::exit(1)

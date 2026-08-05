@@ -21,6 +21,8 @@ use std::thread::ScopedJoinHandle;
 
 pub mod fs;
 pub mod jni;
+#[cfg(windows)]
+pub mod windows;
 
 pub fn copy_owned<S: Clone>(slice: &[S]) -> Vec<S> {
     let mut res = Vec::with_capacity(slice.len());
