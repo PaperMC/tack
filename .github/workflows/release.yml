@@ -55,12 +55,13 @@ jobs:
               # Uncompressed standalone AppImage
               clean_name="${asset_name%-appimage}"
               cp "$dir"/*.AppImage "release_assets/${clean_name}.AppImage"
+              chmod +x "release_assets/${clean_name}.AppImage"
             elif [[ "$artifact_name" == *windows* ]]; then
               # Compressed Windows zip
-              (cd "$dir" && zip -r "../../release_assets/${asset_name}.zip" .)
+              (cd "$dir" && zip -r "../../release_assets/${asset_name}.zip" *)
             else
               # Compressed Linux / macOS tar.gz
-              tar -czf "release_assets/${asset_name}.tar.gz" -C "$dir" .
+              (cd "$dir" && chmod +x * && tar -czf "../../release_assets/${asset_name}.tar.gz" *)
             fi
           done
 
