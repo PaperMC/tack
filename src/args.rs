@@ -36,7 +36,7 @@ pub enum RecordMode {
     #[default]
     Normal,
     Check,
-    OnlyUse,
+    Require,
     NoRecord,
     OnlyRecord,
     ForceRecord,
@@ -97,18 +97,18 @@ pub fn split_args(args: Vec<String>) -> Result<Option<ArgOptions>, Error> {
                 }
                 app_args.push(arg);
             }
-            "--check-aot" | "--only-use-aot" | "--no-record" | "--only-record" | "--force-record" | "--no-aot" => {
+            "--check-aot" | "--require-aot" | "--no-record" | "--only-record" | "--force-record" | "--no-aot" => {
                 if jvm_args.is_empty() && app_args.is_empty() && jar.is_none() {
                     if record_preference != RecordMode::Normal {
                         eprintln!(
-                            "--check-aot, --only-use-aot, --no-record, --only-record, \
+                            "--check-aot, --record-aot, --no-record, --only-record, \
                             --force-record, and --no-aot may only be specified once"
                         );
                         return Err(Error::Exit(1));
                     }
                     record_preference = match arg.as_str() {
                         "--check-aot" => RecordMode::Check,
-                        "--only-use-aot" => RecordMode::OnlyUse,
+                        "--require-aot" => RecordMode::Require,
                         "--no-record" => RecordMode::NoRecord,
                         "--only-record" => RecordMode::OnlyRecord,
                         "--force-record" => RecordMode::ForceRecord,
@@ -475,7 +475,7 @@ fn print_help(first_arg: String) -> Result<Option<ArgOptions>, Error> {
               --check-aot    Checks if a valid AOT cache file exists. If it does,
                              tack will immediately exit with exit code 0. If
                              not, tack will exit with exit code 1.
-              --only-use-aot Require an existing valid AOT cache to be present. If
+              --require-aot  Require an existing valid AOT cache to be present. If
                              no valid AOT cache file exists, tack will not
                              start, returning exit code {} instead.
               --no-record    Do not record AOT information. If a valid AOT cache
@@ -653,14 +653,14 @@ mod tests {
     fn test_split_args_aot_flag() {
         let args = vec![
             "tack".to_string(),
-            "--only-use-aot".to_string(),
+            "--require-aot".to_string(),
             "-Xmx1G".to_string(),
             "-jar".to_string(),
             "server.jar".to_string(),
         ];
         let res = split_args(args).unwrap().unwrap();
         assert_eq!(res.jar, "server.jar");
-        assert_eq!(res.record, RecordMode::OnlyUse);
+        assert_eq!(res.record, RecordMode::Require);
         assert_eq!(res.jvm_args, vec!["-Xmx1G"]);
         assert!(res.app_args.is_empty());
     }

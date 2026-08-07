@@ -52,7 +52,7 @@ pub fn check_aot_opt(launcher: &Launcher) -> Result<AotCacheAction, Error> {
             return match launcher.record {
                 RecordMode::Normal | RecordMode::OnlyRecord | RecordMode::ForceRecord => Ok(AotCacheAction::Record),
                 RecordMode::Check => Err(Error::Exit(1)),
-                RecordMode::OnlyUse => {
+                RecordMode::Require => {
                     eprintln!("No AOT cache found");
                     Err(Error::Exit(ONLY_USE_AOT_FAILED_EXIT_CODE))
                 }
@@ -73,7 +73,7 @@ pub fn check_aot_opt(launcher: &Launcher) -> Result<AotCacheAction, Error> {
             }
         }
         RecordMode::Check => Err(Error::Exit(if current_meta == saved_meta { 0 } else { 1 })),
-        RecordMode::OnlyUse => {
+        RecordMode::Require => {
             if current_meta != saved_meta {
                 eprintln!("AOT cache is invalid");
                 Err(Error::Exit(ONLY_USE_AOT_FAILED_EXIT_CODE))
