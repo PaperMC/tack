@@ -21,6 +21,7 @@ use crate::util::ComposingIterator;
 use indoc::indoc;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::path::Path;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ArgOptions {
@@ -66,7 +67,10 @@ pub fn split_args(args: Vec<String>) -> Result<Option<ArgOptions>, Error> {
     let mut compat = false;
 
     let mut args_iter = ComposingIterator::new(Box::new(args.into_iter()));
-    let first_arg = args_iter.next().unwrap();
+    let first_arg = Path::new(&args_iter.next().unwrap())
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "tack".to_string());
 
     let mut disable_at_files = false;
 
