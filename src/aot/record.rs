@@ -98,9 +98,14 @@ impl<'a> AotRecorder<'a> {
     }
 
     pub fn record_aot_cache(&self) -> Result<(), Error> {
+        // Paper
         let watchdog_thread = jni_str!("org/spigotmc/WatchdogThread");
-        let has_started_field = jni_str!("hasStarted");
-        let has_started_sig = jni_sig!("Z");
+        let watchdog_thread_has_started_field = jni_str!("hasStarted");
+        // Folia
+        let tick_regions = jni_str!("io/papermc/paper/threadedregions/TickRegions");
+        let tick_regions_started_field = jni_str!("started");
+        // Both
+        let bool_sig = jni_sig!("Z");
 
         loop {
             std::thread::sleep(Duration::from_millis(100));
@@ -117,8 +122,23 @@ impl<'a> AotRecorder<'a> {
                 return Ok(());
             }
 
+            // Check Folia first. On Paper the `started` field won't exist.
+            let _ = try {
+                let started = env
+                    .get_static_field(tick_regions, tick_regions_started_field, &bool_sig)?
+                    .z();
+                match started {
+                    Ok(true) => break,
+                    Ok(false) => continue,
+                    Err(jni::errors::Error::JavaException) => {
+                        env.exception_clear(); // ignore it
+                    }
+                    Err(e) => return Err(Error::from(e)),
+                }
+            };
+
             let has_started = env
-                .get_static_field(watchdog_thread, has_started_field, &has_started_sig)?
+                .get_static_field(watchdog_thread, watchdog_thread_has_started_field, &bool_sig)?
                 .z();
             match has_started {
                 Ok(true) => break,
