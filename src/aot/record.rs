@@ -257,7 +257,7 @@ impl<'a> AotRecorder<'a> {
         }
 
         let jvm_args = &self.launcher.args.jvm;
-        jvm_args.iter().filter(|arg| arg.starts_with("-XX:")).for_each(|arg| {
+        jvm_args.iter().filter(|arg| arg.starts_with("-XX:") || arg.starts_with("--")).for_each(|arg| {
             cmd.arg(arg);
         });
 
