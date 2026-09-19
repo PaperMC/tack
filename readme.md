@@ -120,3 +120,5 @@ roughly 33% less JIT compilation work than the regular run.
 Finally, to combine the findings of the two charts into one, this chart shows the amount of runtime the JVM is spending
 towards JIT compilation of the classes during the class loading process. This may be the most dramatic of the three
 charts, as the drop off of the orange AOT run almost perfectly drops to 0 halfway through the non-AOT run.
+
+<img src="https://papermc.io/assets/misc/namespace-oss-badge.svg?project=tack" alt="CI powered by namespace badge" />

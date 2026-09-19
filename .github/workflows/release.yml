@@ -8,13 +8,13 @@ on:
 jobs:
   release:
     name: Create Release
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-linux-default
     permissions:
       contents: write
       actions: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: namespacelabs/nscloud-checkout-action@v9
 
       - name: Wait for Build workflow
         id: get_build_run
