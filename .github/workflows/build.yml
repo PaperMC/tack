@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - main
+  pull_request:
 
 jobs:
   prepare:
@@ -18,7 +19,6 @@ jobs:
     name: Build ${{ matrix.target }}${{ matrix.is_appimage && ' AppImage' || '' }}
     needs: prepare
     runs-on: ${{ matrix.runner }}
-    container: almalinux:8
     strategy:
       fail-fast: false
       matrix:
@@ -54,8 +54,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: namespacelabs/nscloud-checkout-action@v9
-      - name: Install dependencies
-        run: dnf install -y gcc gcc-c++ make openssl-devel libcurl-devel pkgconf-pkg-config git file llvm
+      # - name: Install dependencies
+      #   run: dnf install -y gcc gcc-c++ make openssl-devel libcurl-devel pkgconf-pkg-config git file llvm
+      - name: Install LLVM tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-20
+          echo "/usr/lib/llvm-20/bin" >> "$GITHUB_PATH"
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -69,7 +74,7 @@ jobs:
         run: |
           cargo build --release ${{ matrix.cargo_flags }} --target ${{ matrix.target }}
           # Compress file while maintaining debuginfo
-          llvm-dwarfutil target/${{ matrix.target }}/release/tack target/${{ matrix.target }}/release/tack-gc
+          llvm-dwarfutil-20 target/${{ matrix.target }}/release/tack target/${{ matrix.target }}/release/tack-gc
           objcopy --compress-debug-sections=zlib target/${{ matrix.target }}/release/tack-gc target/${{ matrix.target }}/release/tack-zlib
           mv target/${{ matrix.target }}/release/tack-zlib target/${{ matrix.target }}/release/tack
 
@@ -81,7 +86,7 @@ jobs:
           path: target/${{ matrix.target }}/release/tack
 
       - name: Build AppImage
-        if: matrix.is_appimage == true
+        if: matrix.is_appimage == true && github.event_name != 'pull_request'
         env:
           APPIMAGE_EXTRACT_AND_RUN: 1
         run: |
@@ -110,7 +115,7 @@ jobs:
           mv tack-${{ matrix.appimage_arch }}.AppImage tack.AppImage
 
       - name: Upload AppImage artifact
-        if: matrix.is_appimage == true
+        if: matrix.is_appimage == true && github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7
         with:
           name: tack-${{ matrix.artifact }}
@@ -162,6 +167,7 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
       - name: Upload binary artifact
         uses: actions/upload-artifact@v7
+        if: github.event_name != 'pull_request'
         with:
           name: tack-${{ matrix.artifact }}
           path: target/${{ matrix.target }}/release/tack${{ matrix.extension }}
