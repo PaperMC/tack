@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - main
+  pull_request:
 
 jobs:
   prepare:
@@ -18,7 +19,6 @@ jobs:
     name: Build ${{ matrix.target }}${{ matrix.is_appimage && ' AppImage' || '' }}
     needs: prepare
     runs-on: ${{ matrix.runner }}
-    container: almalinux:8
     strategy:
       fail-fast: false
       matrix:
@@ -110,7 +110,7 @@ jobs:
           mv tack-${{ matrix.appimage_arch }}.AppImage tack.AppImage
 
       - name: Upload AppImage artifact
-        if: matrix.is_appimage == true
+        if: matrix.is_appimage == true && github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7
         with:
           name: tack-${{ matrix.artifact }}
@@ -162,6 +162,7 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
       - name: Upload binary artifact
         uses: actions/upload-artifact@v7
+        if: github.event_name != 'pull_request'
         with:
           name: tack-${{ matrix.artifact }}
           path: target/${{ matrix.target }}/release/tack${{ matrix.extension }}
