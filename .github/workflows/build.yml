@@ -54,8 +54,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: namespacelabs/nscloud-checkout-action@v9
-      - name: Install dependencies
-        run: dnf install -y gcc gcc-c++ make openssl-devel libcurl-devel pkgconf-pkg-config git file llvm
+      # - name: Install dependencies
+      #   run: dnf install -y gcc gcc-c++ make openssl-devel libcurl-devel pkgconf-pkg-config git file llvm
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
