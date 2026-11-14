@@ -498,7 +498,7 @@ fn print_help(first_arg: String) -> Result<Option<ArgOptions>, Error> {
               --no-aot       Disable all AOT features completely.
 
             AOT Compatibility Mode:
-              --aot-comopat  If AOT cache recording fails, you can try with compat
+              --aot-compat  If AOT cache recording fails, you can try with compat
                              mode enabled. This disables some AOT recording
                              features, which may allow the recording to complete, at
                              the cost of slightly reduced performance. This argument
